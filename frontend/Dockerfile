@@ -11,7 +11,7 @@ RUN npm ci
 COPY . .
 
 # Set build arguments (NEXT_PUBLIC_API_URL must be supplied during build time)
-ARG NEXT_PUBLIC_API_URL
+ARG NEXT_PUBLIC_API_URL=https://chronos-backend-410257364704.europe-west1.run.app
 ENV NEXT_PUBLIC_API_URL=$NEXT_PUBLIC_API_URL
 
 # Build the project
@@ -36,3 +36,4 @@ EXPOSE 3000
 
 # Start next.js production server binding to the correct port
 CMD ["sh", "-c", "npx next start -p ${PORT:-3000}"]
+
