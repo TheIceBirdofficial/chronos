@@ -200,7 +200,7 @@ Reply in 1-2 sentences concluding that their timeline calibration is complete an
       catObj.personalizedTimeline = true;
       catObj.personalizationLog = personalizationHistory;
 
-      const res = await fetch(`http://localhost:5000/api/tasks/${task.id}`, {
+      const res = await fetch(`${API_BASE}/api/tasks/${task.id}`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -682,7 +682,7 @@ No markdown, no explanation.`;
                                           completedCheckpoints
                                         });
 
-                                        const updateRes = await fetch(`http://localhost:5000/api/tasks/${task?.id}`, {
+                                        const updateRes = await fetch(`${API_BASE}/api/tasks/${task?.id}`, {
                                           method: 'PUT',
                                           headers: { 'Content-Type': 'application/json' },
                                           body: JSON.stringify({ category: updatedCat })

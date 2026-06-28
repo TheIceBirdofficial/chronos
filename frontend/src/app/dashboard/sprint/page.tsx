@@ -118,7 +118,7 @@ function SprintPageContent() {
 
     const fetchTask = async () => {
       try {
-        const res = await fetch(`http://localhost:5000/api/tasks`);
+        const res = await fetch(`${API_BASE}/api/tasks`);
         if (!res.ok) throw new Error("Failed to load tasks");
         const list: Task[] = await res.json();
         const found = list.find(t => String(t.id) === String(taskId));
@@ -199,7 +199,7 @@ function SprintPageContent() {
     const aiConfig = savedConfig ? JSON.parse(savedConfig) : null;
 
     try {
-      const res = await fetch(`http://localhost:5000/api/tasks/${task.id}/complete_sprint`, {
+      const res = await fetch(`${API_BASE}/api/tasks/${task.id}/complete_sprint`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({

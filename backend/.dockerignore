@@ -1,0 +1,12 @@
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.db
+chronos.db
+settings.json
+interventions.json
+.git
+.gitignore
+Dockerfile
+.dockerignore

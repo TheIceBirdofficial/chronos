@@ -1,0 +1,11 @@
+steps:
+  # Build the container image
+  - name: 'gcr.io/cloud-builders/docker'
+    args:
+      - 'build'
+      - '-t'
+      - 'gcr.io/$PROJECT_ID/chronos-backend:latest'
+      - '.'
+
+images:
+  - 'gcr.io/$PROJECT_ID/chronos-backend:latest'

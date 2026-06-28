@@ -84,6 +84,7 @@ last_voice_link_ping = 0.0
 voice_muted = False
 voice_muted_until = 0.0
 is_speaking = False
+voice_conversation_history = []
 
 INTERVENTIONS_FILE = os.path.join(os.path.dirname(__file__), 'interventions.json')
 last_voice_event_speak_time = 0.0
@@ -2360,13 +2361,23 @@ def voice_query():
         if tasks_info:
             system_prompt += f" Use this context if relevant:{tasks_info}"
             
+        global voice_conversation_history
+        voice_conversation_history.append({"role": "user", "content": query_text})
+        if len(voice_conversation_history) > 10:
+            voice_conversation_history = voice_conversation_history[-10:]
+            
         provider = "gemini" if os.environ.get("GEMINI_API_KEY") else "ollama"
         model = "gemini-1.5-flash" if provider == "gemini" else "gemma2:2b"
         
         reply = ""
         if provider == "gemini":
             api_key = os.environ.get("GEMINI_API_KEY")
-            contents = [{"role": "user", "parts": [{"text": query_text}]}]
+            contents = []
+            for msg in voice_conversation_history:
+                contents.append({
+                    "role": "user" if msg["role"] == "user" else "model",
+                    "parts": [{"text": msg["content"]}]
+                })
             url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={api_key}"
             payload = {
                 "contents": contents,
@@ -2384,12 +2395,12 @@ def voice_query():
                 
         if provider == "ollama":
             url = "http://localhost:11434/api/chat"
+            messages = [{"role": "system", "content": system_prompt}]
+            for msg in voice_conversation_history:
+                messages.append({"role": msg["role"], "content": msg["content"]})
             payload = {
                 "model": model,
-                "messages": [
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": query_text}
-                ],
+                "messages": messages,
                 "stream": False
             }
             res = requests.post(url, json=payload, timeout=10)
@@ -2398,6 +2409,7 @@ def voice_query():
             else:
                 reply = "Tactical link offline. Manual input requested."
                 
+        voice_conversation_history.append({"role": "assistant", "content": reply})
         return jsonify({"content": reply})
     except Exception as e:
         return jsonify({"error": str(e)}), 500

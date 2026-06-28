@@ -729,39 +729,6 @@ export default function Dashboard() {
     return () => clearInterval(interval);
   }, []);
 
-  // Global keypress listener for double backtick (`) mute
-  useEffect(() => {
-    let lastPress = 0;
-    const handleKeyDown = (e: KeyboardEvent) => {
-      if (
-        document.activeElement?.tagName === 'INPUT' ||
-        document.activeElement?.tagName === 'TEXTAREA'
-      ) {
-        return;
-      }
-      if (e.key === '`') {
-        const now = Date.now();
-        if (now - lastPress < 500) {
-          e.preventDefault();
-          fetch(`${API_BASE}/api/voice/mute`, {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ duration: 600 })
-          })
-          .then(res => res.json())
-          .then(data => {
-            toast.success("Chronos speech silenced.");
-            setOrbText("Chronos Voice Link: Silenced.");
-            setOrbState("idle");
-          })
-          .catch(err => console.warn("Failed to mute reminders", err));
-        }
-        lastPress = now;
-      }
-    };
-    window.addEventListener('keydown', handleKeyDown);
-    return () => window.removeEventListener('keydown', handleKeyDown);
-  }, []);
 
   // Initialize Settings States when opened
   useEffect(() => {
