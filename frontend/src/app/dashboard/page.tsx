@@ -1739,7 +1739,11 @@ Consider the operator's digital twin profile: ${performanceTwin}.${tasksInfo}`;
     
     recognition.onerror = (event: any) => {
       console.warn("Speech recognition error:", event.error);
-      toast.error(`Recognition error: ${event.error}`);
+      if (event.error === 'not-allowed') {
+        toast.error("Microphone access denied. Click the camera/microphone icon in the browser address bar and select 'Allow' to use voice features.");
+      } else {
+        toast.error(`Speech recognition failed: ${event.error}`);
+      }
       setOrbState('idle');
       setOrbText("Chronos Voice Link: Sync Active.");
       setIsBrowserListening(false);

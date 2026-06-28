@@ -420,8 +420,8 @@ if os.environ.get('WERKZEUG_RUN_MAIN') == 'true' or not os.environ.get('FLASK_US
 app = Flask(__name__, static_folder='../frontend', static_url_path='')
 CORS(app)
 
-# Persistent Local Database File path (SQLite)
-SQLITE_DB = os.path.join(os.path.dirname(__file__), 'chronos.db')
+# Persistent Database File path (SQLite)
+SQLITE_DB = os.environ.get("SQLITE_DB_PATH", os.path.join(os.path.dirname(__file__), 'chronos.db'))
 
 def init_sqlite_db():
     conn = sqlite3.connect(SQLITE_DB)
