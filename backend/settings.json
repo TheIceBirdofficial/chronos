@@ -1,0 +1,18 @@
+{
+  "username": "Akash",
+  "sleepStart": 23,
+  "sleepEnd": 7,
+  "ntfyTopic": "chronos-alerts-akash",
+  "twinProfile": "- **User:** Akash\n- **Role:** Software Engineer\n- **Style:** Aesthetic perfectionist who values visual completion and high-fidelity interface feedback.\n- **Productivity Peaks:** Focus peaks during late evening (8:30 PM - 10:30 PM) and mid-morning (9:30 AM - 11:30 AM).\n- **Procrastination Triggers:** Prone to analysis paralysis and postponement on vague, administrative, or poorly defined tasks.\n- **Procrastination Rating:** 6.0/10 \n- **Behavioral Patterns:**\n    - Demonstrates a high sense of satisfaction in completing tasks, especially frontend development.\n    - Appears to work efficiently and prioritize tasks, focusing on larger projects with visible deadlines like the deployment process.  \n    - Shows signs of project management by working on multiple tasks simultaneously (frontend optimization, backend fixes, voice daemon rebuild, pitch work, and project deployment). \n    - Exhibits meticulousness in testing the app's functionality from a client perspective, actively seeking out and addressing potential issues.  \n    - Demonstrates strong understanding of his ideal project completion process, with a clear emphasis on achieving high-quality results.  \n    - Shows anticipation for the hackathon competition and desires to showcase a polished, functional product to maximize impact. \n\n",
+  "procrastinationRating": 6.0,
+  "attentionCycle": "Focus cycles peak late evening",
+  "stressResponse": "Postpones tasks under high workload pressure",
+  "executionCount": 0,
+  "failureCount": 0,
+  "streakCount": 0,
+  "totalRecoveredHours": 0.0,
+  "aiProvider": "ollama",
+  "aiApiUrl": "http://localhost:11434",
+  "aiApiKey": "",
+  "aiModel": "gemma2:2b"
+}

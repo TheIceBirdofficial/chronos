@@ -1,0 +1,961 @@
+{
+  "totals": {
+    "interventions": 68,
+    "successes": 68,
+    "ignored": 0
+  },
+  "log": [
+    {
+      "timestamp": "2026-06-28T14:31:00.386553",
+      "event_type": "SURVIVAL_COLLAPSE",
+      "task_id": "a96ef54e-8f8c-4f64-9b4e-dd9473a6223b",
+      "survival_score": 48,
+      "confidence": 91,
+      "expected_imp": 22,
+      "actions_taken": [
+        "Priority Elevated",
+        "Voice Warning Issued"
+      ],
+      "spoken_text": "Operational alert. You are beginning to fall behind on 'hackathon'.",
+      "status": "success"
+    },
+    {
+      "timestamp": "2026-06-28T14:36:00.628933",
+      "event_type": "SURVIVAL_COLLAPSE",
+      "task_id": "a96ef54e-8f8c-4f64-9b4e-dd9473a6223b",
+      "survival_score": 47,
+      "confidence": 91,
+      "expected_imp": 22,
+      "actions_taken": [
+        "Priority Elevated",
+        "Voice Warning Issued"
+      ],
+      "spoken_text": "Warning. The schedule for 'hackathon' is becoming compressed. Work remaining is 20 hours.",
+      "status": "success"
+    },
+    {
+      "timestamp": "2026-06-28T14:37:30.660943",
+      "event_type": "SURVIVAL_COLLAPSE",
+      "task_id": "a96ef54e-8f8c-4f64-9b4e-dd9473a6223b",
+      "survival_score": 48,
+      "confidence": 91,
+      "expected_imp": 22,
+      "actions_taken": [
+        "Priority Elevated",
+        "Voice Warning Issued"
+      ],
+      "spoken_text": "Assertive alert. Immediate focused action is now recommended on 'hackathon'.",
+      "status": "success"
+    },
+    {
+      "timestamp": "2026-06-28T14:41:03.150589",
+      "event_type": "SURVIVAL_COLLAPSE",
+      "task_id": "a96ef54e-8f8c-4f64-9b4e-dd9473a6223b",
+      "survival_score": 40,
+      "confidence": 91,
+      "expected_imp": 22,
+      "actions_taken": [
+        "Priority Elevated",
+        "Voice Warning Issued"
+      ],
+      "spoken_text": "Critical risk. Your estimated work exceeds remaining productive hours. Completing a milestone immediately is required.",
+      "status": "success"
+    },
+    {
+      "timestamp": "2026-06-28T14:42:00.339967",
+      "event_type": "SURVIVAL_COLLAPSE",
+      "task_id": "a96ef54e-8f8c-4f64-9b4e-dd9473a6223b",
+      "survival_score": 45,
+      "confidence": 91,
+      "expected_imp": 22,
+      "actions_taken": [
+        "Priority Elevated",
+        "Voice Warning Issued"
+      ],
+      "spoken_text": "Critical risk. Your estimated work exceeds remaining productive hours. Completing a milestone immediately is required.",
+      "status": "success"
+    },
+    {
+      "timestamp": "2026-06-28T14:43:30.633881",
+      "event_type": "SURVIVAL_COLLAPSE",
+      "task_id": "a96ef54e-8f8c-4f64-9b4e-dd9473a6223b",
+      "survival_score": 40,
+      "confidence": 91,
+      "expected_imp": 22,
+      "actions_taken": [
+        "Priority Elevated",
+        "Voice Warning Issued"
+      ],
+      "spoken_text": "Critical risk. Your estimated work exceeds remaining productive hours. Completing a milestone immediately is required.",
+      "status": "success"
+    },
+    {
+      "timestamp": "2026-06-28T14:44:30.624709",
+      "event_type": "SURVIVAL_COLLAPSE",
+      "task_id": "a96ef54e-8f8c-4f64-9b4e-dd9473a6223b",
+      "survival_score": 52,
+      "confidence": 91,
+      "expected_imp": 22,
+      "actions_taken": [
+        "Priority Elevated",
+        "Voice Warning Issued"
+      ],
+      "spoken_text": "Critical risk. Your estimated work exceeds remaining productive hours. Completing a milestone immediately is required.",
+      "status": "success"
+    },
+    {
+      "timestamp": "2026-06-28T14:45:30.362850",
+      "event_type": "SURVIVAL_COLLAPSE",
+      "task_id": "a96ef54e-8f8c-4f64-9b4e-dd9473a6223b",
+      "survival_score": 42,
+      "confidence": 91,
+      "expected_imp": 22,
+      "actions_taken": [
+        "Priority Elevated",
+        "Voice Warning Issued"
+      ],
+      "spoken_text": "Critical risk. Your estimated work exceeds remaining productive hours. Completing a milestone immediately is required.",
+      "status": "success"
+    },
+    {
+      "timestamp": "2026-06-28T14:51:04.360001",
+      "event_type": "SURVIVAL_COLLAPSE",
+      "task_id": "a96ef54e-8f8c-4f64-9b4e-dd9473a6223b",
+      "survival_score": 40,
+      "confidence": 91,
+      "expected_imp": 22,
+      "actions_taken": [
+        "Priority Elevated",
+        "Voice Warning Issued"
+      ],
+      "spoken_text": "Critical risk. Your estimated work exceeds remaining productive hours. Completing a milestone immediately is required.",
+      "status": "success"
+    },
+    {
+      "timestamp": "2026-06-28T14:56:34.524379",
+      "event_type": "SURVIVAL_COLLAPSE",
+      "task_id": "a96ef54e-8f8c-4f64-9b4e-dd9473a6223b",
+      "survival_score": 40,
+      "confidence": 91,
+      "expected_imp": 22,
+      "actions_taken": [
+        "Priority Elevated",
+        "Voice Warning Issued"
+      ],
+      "spoken_text": "Critical risk. Your estimated work exceeds remaining productive hours. Completing a milestone immediately is required.",
+      "status": "success"
+    },
+    {
+      "timestamp": "2026-06-28T14:59:04.414015",
+      "event_type": "SURVIVAL_COLLAPSE",
+      "task_id": "a96ef54e-8f8c-4f64-9b4e-dd9473a6223b",
+      "survival_score": 60,
+      "confidence": 91,
+      "expected_imp": 22,
+      "actions_taken": [
+        "Priority Elevated",
+        "Voice Warning Issued"
+      ],
+      "spoken_text": "Critical risk. Your estimated work exceeds remaining productive hours. Completing a milestone immediately is required.",
+      "status": "success"
+    },
+    {
+      "timestamp": "2026-06-28T15:00:04.462975",
+      "event_type": "SURVIVAL_COLLAPSE",
+      "task_id": "a96ef54e-8f8c-4f64-9b4e-dd9473a6223b",
+      "survival_score": 45,
+      "confidence": 91,
+      "expected_imp": 22,
+      "actions_taken": [
+        "Priority Elevated",
+        "Voice Warning Issued"
+      ],
+      "spoken_text": "Critical risk. Your estimated work exceeds remaining productive hours. Completing a milestone immediately is required.",
+      "status": "success"
+    },
+    {
+      "timestamp": "2026-06-28T15:01:34.319857",
+      "event_type": "SURVIVAL_COLLAPSE",
+      "task_id": "a96ef54e-8f8c-4f64-9b4e-dd9473a6223b",
+      "survival_score": 42,
+      "confidence": 91,
+      "expected_imp": 22,
+      "actions_taken": [
+        "Priority Elevated",
+        "Voice Warning Issued"
+      ],
+      "spoken_text": "Critical risk. Your estimated work exceeds remaining productive hours. Completing a milestone immediately is required.",
+      "status": "success"
+    },
+    {
+      "timestamp": "2026-06-28T15:05:04.322787",
+      "event_type": "SURVIVAL_COLLAPSE",
+      "task_id": "a96ef54e-8f8c-4f64-9b4e-dd9473a6223b",
+      "survival_score": 42,
+      "confidence": 91,
+      "expected_imp": 22,
+      "actions_taken": [
+        "Priority Elevated",
+        "Voice Warning Issued"
+      ],
+      "spoken_text": "Critical risk. Your estimated work exceeds remaining productive hours. Completing a milestone immediately is required.",
+      "status": "success"
+    },
+    {
+      "timestamp": "2026-06-28T15:09:04.359846",
+      "event_type": "SURVIVAL_COLLAPSE",
+      "task_id": "a96ef54e-8f8c-4f64-9b4e-dd9473a6223b",
+      "survival_score": 48,
+      "confidence": 91,
+      "expected_imp": 22,
+      "actions_taken": [
+        "Priority Elevated",
+        "Voice Warning Issued"
+      ],
+      "spoken_text": "Critical risk. Your estimated work exceeds remaining productive hours. Completing a milestone immediately is required.",
+      "status": "success"
+    },
+    {
+      "timestamp": "2026-06-28T15:22:34.655584",
+      "event_type": "SURVIVAL_COLLAPSE",
+      "task_id": "a96ef54e-8f8c-4f64-9b4e-dd9473a6223b",
+      "survival_score": 47,
+      "confidence": 91,
+      "expected_imp": 22,
+      "actions_taken": [
+        "Priority Elevated",
+        "Voice Warning Issued"
+      ],
+      "spoken_text": "Critical risk. Your estimated work exceeds remaining productive hours. Completing a milestone immediately is required.",
+      "status": "success"
+    },
+    {
+      "timestamp": "2026-06-28T15:26:34.266216",
+      "event_type": "SURVIVAL_COLLAPSE",
+      "task_id": "a96ef54e-8f8c-4f64-9b4e-dd9473a6223b",
+      "survival_score": 60,
+      "confidence": 91,
+      "expected_imp": 22,
+      "actions_taken": [
+        "Priority Elevated",
+        "Voice Warning Issued"
+      ],
+      "spoken_text": "Critical risk. Your estimated work exceeds remaining productive hours. Completing a milestone immediately is required.",
+      "status": "success"
+    },
+    {
+      "timestamp": "2026-06-28T15:28:34.206738",
+      "event_type": "SURVIVAL_COLLAPSE",
+      "task_id": "a96ef54e-8f8c-4f64-9b4e-dd9473a6223b",
+      "survival_score": 40,
+      "confidence": 91,
+      "expected_imp": 22,
+      "actions_taken": [
+        "Priority Elevated",
+        "Voice Warning Issued"
+      ],
+      "spoken_text": "Critical risk. Your estimated work exceeds remaining productive hours. Completing a milestone immediately is required.",
+      "status": "success"
+    },
+    {
+      "timestamp": "2026-06-28T15:31:04.520063",
+      "event_type": "SURVIVAL_COLLAPSE",
+      "task_id": "a96ef54e-8f8c-4f64-9b4e-dd9473a6223b",
+      "survival_score": 48,
+      "confidence": 91,
+      "expected_imp": 22,
+      "actions_taken": [
+        "Priority Elevated",
+        "Voice Warning Issued"
+      ],
+      "spoken_text": "Critical risk. Your estimated work exceeds remaining productive hours. Completing a milestone immediately is required.",
+      "status": "success"
+    },
+    {
+      "timestamp": "2026-06-28T15:34:34.349248",
+      "event_type": "SURVIVAL_COLLAPSE",
+      "task_id": "a96ef54e-8f8c-4f64-9b4e-dd9473a6223b",
+      "survival_score": 42,
+      "confidence": 91,
+      "expected_imp": 22,
+      "actions_taken": [
+        "Priority Elevated",
+        "Voice Warning Issued"
+      ],
+      "spoken_text": "Critical risk. Your estimated work exceeds remaining productive hours. Completing a milestone immediately is required.",
+      "status": "success"
+    },
+    {
+      "timestamp": "2026-06-28T15:39:04.394052",
+      "event_type": "SURVIVAL_COLLAPSE",
+      "task_id": "a96ef54e-8f8c-4f64-9b4e-dd9473a6223b",
+      "survival_score": 42,
+      "confidence": 91,
+      "expected_imp": 22,
+      "actions_taken": [
+        "Priority Elevated",
+        "Voice Warning Issued"
+      ],
+      "spoken_text": "Critical risk. Your estimated work exceeds remaining productive hours. Completing a milestone immediately is required.",
+      "status": "success"
+    },
+    {
+      "timestamp": "2026-06-28T15:44:04.259427",
+      "event_type": "SURVIVAL_COLLAPSE",
+      "task_id": "a96ef54e-8f8c-4f64-9b4e-dd9473a6223b",
+      "survival_score": 48,
+      "confidence": 91,
+      "expected_imp": 22,
+      "actions_taken": [
+        "Priority Elevated",
+        "Voice Warning Issued"
+      ],
+      "spoken_text": "Critical risk. Your estimated work exceeds remaining productive hours. Completing a milestone immediately is required.",
+      "status": "success"
+    },
+    {
+      "timestamp": "2026-06-28T15:46:34.310799",
+      "event_type": "SURVIVAL_COLLAPSE",
+      "task_id": "a96ef54e-8f8c-4f64-9b4e-dd9473a6223b",
+      "survival_score": 42,
+      "confidence": 91,
+      "expected_imp": 22,
+      "actions_taken": [
+        "Priority Elevated",
+        "Voice Warning Issued"
+      ],
+      "spoken_text": "Critical risk. Your estimated work exceeds remaining productive hours. Completing a milestone immediately is required.",
+      "status": "success"
+    },
+    {
+      "timestamp": "2026-06-28T15:49:04.289784",
+      "event_type": "SURVIVAL_COLLAPSE",
+      "task_id": "a96ef54e-8f8c-4f64-9b4e-dd9473a6223b",
+      "survival_score": 60,
+      "confidence": 91,
+      "expected_imp": 22,
+      "actions_taken": [
+        "Priority Elevated",
+        "Voice Warning Issued"
+      ],
+      "spoken_text": "Critical risk. Your estimated work exceeds remaining productive hours. Completing a milestone immediately is required.",
+      "status": "success"
+    },
+    {
+      "timestamp": "2026-06-28T15:56:45.445730",
+      "event_type": "SURVIVAL_COLLAPSE",
+      "task_id": "a96ef54e-8f8c-4f64-9b4e-dd9473a6223b",
+      "survival_score": 48,
+      "confidence": 91,
+      "expected_imp": 22,
+      "actions_taken": [
+        "Priority Elevated",
+        "Voice Warning Issued"
+      ],
+      "spoken_text": "Critical risk. Your estimated work exceeds remaining productive hours. Completing a milestone immediately is required.",
+      "status": "success"
+    },
+    {
+      "timestamp": "2026-06-28T15:59:45.476221",
+      "event_type": "SURVIVAL_COLLAPSE",
+      "task_id": "a96ef54e-8f8c-4f64-9b4e-dd9473a6223b",
+      "survival_score": 42,
+      "confidence": 91,
+      "expected_imp": 22,
+      "actions_taken": [
+        "Priority Elevated",
+        "Voice Warning Issued"
+      ],
+      "spoken_text": "Critical risk. Your estimated work exceeds remaining productive hours. Completing a milestone immediately is required.",
+      "status": "success"
+    },
+    {
+      "timestamp": "2026-06-28T16:00:45.510221",
+      "event_type": "SURVIVAL_COLLAPSE",
+      "task_id": "a96ef54e-8f8c-4f64-9b4e-dd9473a6223b",
+      "survival_score": 40,
+      "confidence": 91,
+      "expected_imp": 22,
+      "actions_taken": [
+        "Priority Elevated",
+        "Voice Warning Issued"
+      ],
+      "spoken_text": "Critical risk. Your estimated work exceeds remaining productive hours. Completing a milestone immediately is required.",
+      "status": "success"
+    },
+    {
+      "timestamp": "2026-06-28T16:02:15.495522",
+      "event_type": "SURVIVAL_COLLAPSE",
+      "task_id": "a96ef54e-8f8c-4f64-9b4e-dd9473a6223b",
+      "survival_score": 42,
+      "confidence": 91,
+      "expected_imp": 22,
+      "actions_taken": [
+        "Priority Elevated",
+        "Voice Warning Issued"
+      ],
+      "spoken_text": "Critical risk. Your estimated work exceeds remaining productive hours. Completing a milestone immediately is required.",
+      "status": "success"
+    },
+    {
+      "timestamp": "2026-06-28T16:05:45.556387",
+      "event_type": "SURVIVAL_COLLAPSE",
+      "task_id": "a96ef54e-8f8c-4f64-9b4e-dd9473a6223b",
+      "survival_score": 40,
+      "confidence": 91,
+      "expected_imp": 22,
+      "actions_taken": [
+        "Priority Elevated",
+        "Voice Warning Issued"
+      ],
+      "spoken_text": "Critical risk. Your estimated work exceeds remaining productive hours. Completing a milestone immediately is required.",
+      "status": "success"
+    },
+    {
+      "timestamp": "2026-06-28T16:08:15.528700",
+      "event_type": "SURVIVAL_COLLAPSE",
+      "task_id": "a96ef54e-8f8c-4f64-9b4e-dd9473a6223b",
+      "survival_score": 48,
+      "confidence": 91,
+      "expected_imp": 22,
+      "actions_taken": [
+        "Priority Elevated",
+        "Voice Warning Issued"
+      ],
+      "spoken_text": "Critical risk. Your estimated work exceeds remaining productive hours. Completing a milestone immediately is required.",
+      "status": "success"
+    },
+    {
+      "timestamp": "2026-06-28T16:09:15.600025",
+      "event_type": "SURVIVAL_COLLAPSE",
+      "task_id": "a96ef54e-8f8c-4f64-9b4e-dd9473a6223b",
+      "survival_score": 42,
+      "confidence": 91,
+      "expected_imp": 22,
+      "actions_taken": [
+        "Priority Elevated",
+        "Voice Warning Issued"
+      ],
+      "spoken_text": "Critical risk. Your estimated work exceeds remaining productive hours. Completing a milestone immediately is required.",
+      "status": "success"
+    },
+    {
+      "timestamp": "2026-06-28T17:20:16.043569",
+      "event_type": "SURVIVAL_COLLAPSE",
+      "task_id": "a96ef54e-8f8c-4f64-9b4e-dd9473a6223b",
+      "survival_score": 48,
+      "confidence": 91,
+      "expected_imp": 22,
+      "actions_taken": [
+        "Priority Elevated",
+        "Voice Warning Issued"
+      ],
+      "spoken_text": "Critical risk. Your estimated work exceeds remaining productive hours. Completing a milestone immediately is required.",
+      "status": "success"
+    },
+    {
+      "timestamp": "2026-06-28T17:24:16.226353",
+      "event_type": "SURVIVAL_COLLAPSE",
+      "task_id": "a96ef54e-8f8c-4f64-9b4e-dd9473a6223b",
+      "survival_score": 42,
+      "confidence": 91,
+      "expected_imp": 22,
+      "actions_taken": [
+        "Priority Elevated",
+        "Voice Warning Issued"
+      ],
+      "spoken_text": "Critical risk. Your estimated work exceeds remaining productive hours. Completing a milestone immediately is required.",
+      "status": "success"
+    },
+    {
+      "timestamp": "2026-06-28T17:28:16.373076",
+      "event_type": "SURVIVAL_COLLAPSE",
+      "task_id": "a96ef54e-8f8c-4f64-9b4e-dd9473a6223b",
+      "survival_score": 42,
+      "confidence": 91,
+      "expected_imp": 22,
+      "actions_taken": [
+        "Priority Elevated",
+        "Voice Warning Issued"
+      ],
+      "spoken_text": "Critical risk. Your estimated work exceeds remaining productive hours. Completing a milestone immediately is required.",
+      "status": "success"
+    },
+    {
+      "timestamp": "2026-06-28T17:29:16.091157",
+      "event_type": "SURVIVAL_COLLAPSE",
+      "task_id": "a96ef54e-8f8c-4f64-9b4e-dd9473a6223b",
+      "survival_score": 48,
+      "confidence": 91,
+      "expected_imp": 22,
+      "actions_taken": [
+        "Priority Elevated",
+        "Voice Warning Issued"
+      ],
+      "spoken_text": "Critical risk. Your estimated work exceeds remaining productive hours. Completing a milestone immediately is required.",
+      "status": "success"
+    },
+    {
+      "timestamp": "2026-06-28T17:30:46.041747",
+      "event_type": "SURVIVAL_COLLAPSE",
+      "task_id": "a96ef54e-8f8c-4f64-9b4e-dd9473a6223b",
+      "survival_score": 42,
+      "confidence": 91,
+      "expected_imp": 22,
+      "actions_taken": [
+        "Priority Elevated",
+        "Voice Warning Issued"
+      ],
+      "spoken_text": "Critical risk. Your estimated work exceeds remaining productive hours. Completing a milestone immediately is required.",
+      "status": "success"
+    },
+    {
+      "timestamp": "2026-06-28T22:36:15.628463",
+      "event_type": "SURVIVAL_COLLAPSE",
+      "task_id": "a96ef54e-8f8c-4f64-9b4e-dd9473a6223b",
+      "survival_score": 40,
+      "confidence": 91,
+      "expected_imp": 22,
+      "actions_taken": [
+        "Priority Elevated",
+        "Voice Warning Issued"
+      ],
+      "spoken_text": "Critical risk. Your estimated work exceeds remaining productive hours. Completing a milestone immediately is required.",
+      "status": "success"
+    },
+    {
+      "timestamp": "2026-06-28T22:37:15.780543",
+      "event_type": "SURVIVAL_COLLAPSE",
+      "task_id": "a96ef54e-8f8c-4f64-9b4e-dd9473a6223b",
+      "survival_score": 50,
+      "confidence": 91,
+      "expected_imp": 22,
+      "actions_taken": [
+        "Priority Elevated",
+        "Voice Warning Issued"
+      ],
+      "spoken_text": "Critical risk. Your estimated work exceeds remaining productive hours. Completing a milestone immediately is required.",
+      "status": "success"
+    },
+    {
+      "timestamp": "2026-06-28T22:41:45.852155",
+      "event_type": "SURVIVAL_COLLAPSE",
+      "task_id": "a96ef54e-8f8c-4f64-9b4e-dd9473a6223b",
+      "survival_score": 42,
+      "confidence": 91,
+      "expected_imp": 22,
+      "actions_taken": [
+        "Priority Elevated",
+        "Voice Warning Issued"
+      ],
+      "spoken_text": "Critical risk. Your estimated work exceeds remaining productive hours. Completing a milestone immediately is required.",
+      "status": "success"
+    },
+    {
+      "timestamp": "2026-06-28T22:46:45.818310",
+      "event_type": "SURVIVAL_COLLAPSE",
+      "task_id": "a96ef54e-8f8c-4f64-9b4e-dd9473a6223b",
+      "survival_score": 40,
+      "confidence": 91,
+      "expected_imp": 22,
+      "actions_taken": [
+        "Priority Elevated",
+        "Voice Warning Issued"
+      ],
+      "spoken_text": "Critical risk. Your estimated work exceeds remaining productive hours. Completing a milestone immediately is required.",
+      "status": "success"
+    },
+    {
+      "timestamp": "2026-06-28T22:50:45.688749",
+      "event_type": "SURVIVAL_COLLAPSE",
+      "task_id": "a96ef54e-8f8c-4f64-9b4e-dd9473a6223b",
+      "survival_score": 40,
+      "confidence": 91,
+      "expected_imp": 22,
+      "actions_taken": [
+        "Priority Elevated",
+        "Voice Warning Issued"
+      ],
+      "spoken_text": "Critical risk. Your estimated work exceeds remaining productive hours. Completing a milestone immediately is required.",
+      "status": "success"
+    },
+    {
+      "timestamp": "2026-06-28T22:52:15.612706",
+      "event_type": "SURVIVAL_COLLAPSE",
+      "task_id": "preset-hackathon",
+      "survival_score": 32,
+      "confidence": 91,
+      "expected_imp": 22,
+      "actions_taken": [
+        "Priority Elevated",
+        "Voice Warning Issued"
+      ],
+      "spoken_text": "Assertive alert. Immediate focused action is now recommended on 'Hackathon Demo Submission'.",
+      "status": "success"
+    },
+    {
+      "timestamp": "2026-06-28T22:52:45.849065",
+      "event_type": "SURVIVAL_COLLAPSE",
+      "task_id": "preset-hackathon",
+      "survival_score": 38,
+      "confidence": 91,
+      "expected_imp": 22,
+      "actions_taken": [
+        "Priority Elevated",
+        "Voice Warning Issued"
+      ],
+      "spoken_text": "Assertive alert. Immediate focused action is now recommended on 'Hackathon Demo Submission'.",
+      "status": "success"
+    },
+    {
+      "timestamp": "2026-06-28T22:55:45.792986",
+      "event_type": "SURVIVAL_COLLAPSE",
+      "task_id": "preset-hackathon",
+      "survival_score": 20,
+      "confidence": 91,
+      "expected_imp": 22,
+      "actions_taken": [
+        "Priority Elevated",
+        "Voice Warning Issued"
+      ],
+      "spoken_text": "Critical risk. Your estimated work exceeds remaining productive hours. Completing a milestone immediately is required.",
+      "status": "success"
+    },
+    {
+      "timestamp": "2026-06-28T22:56:21.703605",
+      "event_type": "SURVIVAL_COLLAPSE",
+      "task_id": "preset-pitch",
+      "survival_score": 48,
+      "confidence": 91,
+      "expected_imp": 22,
+      "actions_taken": [
+        "Priority Elevated",
+        "Voice Warning Issued"
+      ],
+      "spoken_text": "Warning. The schedule for 'Investor Pitch Deck finalization' is becoming compressed. Work remaining is 5 hours.",
+      "status": "success"
+    },
+    {
+      "timestamp": "2026-06-28T22:59:15.506590",
+      "event_type": "SURVIVAL_COLLAPSE",
+      "task_id": "preset-hackathon",
+      "survival_score": 40,
+      "confidence": 91,
+      "expected_imp": 22,
+      "actions_taken": [
+        "Priority Elevated",
+        "Voice Warning Issued"
+      ],
+      "spoken_text": "Critical risk. Your estimated work exceeds remaining productive hours. Completing a milestone immediately is required.",
+      "status": "success"
+    },
+    {
+      "timestamp": "2026-06-28T23:00:15.605489",
+      "event_type": "SURVIVAL_COLLAPSE",
+      "task_id": "preset-hackathon",
+      "survival_score": 25,
+      "confidence": 91,
+      "expected_imp": 22,
+      "actions_taken": [
+        "Priority Elevated",
+        "Voice Warning Issued"
+      ],
+      "spoken_text": "Critical risk. Your estimated work exceeds remaining productive hours. Completing a milestone immediately is required.",
+      "status": "success"
+    },
+    {
+      "timestamp": "2026-06-28T23:00:47.635723",
+      "event_type": "SURVIVAL_COLLAPSE",
+      "task_id": "preset-cloud",
+      "survival_score": 47,
+      "confidence": 91,
+      "expected_imp": 22,
+      "actions_taken": [
+        "Priority Elevated",
+        "Voice Warning Issued"
+      ],
+      "spoken_text": "Operational alert. You are beginning to fall behind on 'Cloud Infrastructure Migration'.",
+      "status": "success"
+    },
+    {
+      "timestamp": "2026-06-28T23:00:49.657270",
+      "event_type": "SURVIVAL_COLLAPSE",
+      "task_id": "preset-pitch",
+      "survival_score": 60,
+      "confidence": 91,
+      "expected_imp": 22,
+      "actions_taken": [
+        "Priority Elevated",
+        "Voice Warning Issued"
+      ],
+      "spoken_text": "Assertive alert. Immediate focused action is now recommended on 'Investor Pitch Deck finalization'.",
+      "status": "success"
+    },
+    {
+      "timestamp": "2026-06-28T23:01:15.692226",
+      "event_type": "SURVIVAL_COLLAPSE",
+      "task_id": "preset-hackathon",
+      "survival_score": 42,
+      "confidence": 91,
+      "expected_imp": 22,
+      "actions_taken": [
+        "Priority Elevated",
+        "Voice Warning Issued"
+      ],
+      "spoken_text": "Critical risk. Your estimated work exceeds remaining productive hours. Completing a milestone immediately is required.",
+      "status": "success"
+    },
+    {
+      "timestamp": "2026-06-28T23:02:45.774820",
+      "event_type": "SURVIVAL_COLLAPSE",
+      "task_id": "preset-hackathon",
+      "survival_score": 20,
+      "confidence": 91,
+      "expected_imp": 22,
+      "actions_taken": [
+        "Priority Elevated",
+        "Voice Warning Issued"
+      ],
+      "spoken_text": "Critical risk. Your estimated work exceeds remaining productive hours. Completing a milestone immediately is required.",
+      "status": "success"
+    },
+    {
+      "timestamp": "2026-06-28T23:03:17.976641",
+      "event_type": "SURVIVAL_COLLAPSE",
+      "task_id": "preset-cloud",
+      "survival_score": 60,
+      "confidence": 91,
+      "expected_imp": 22,
+      "actions_taken": [
+        "Priority Elevated",
+        "Voice Warning Issued"
+      ],
+      "spoken_text": "Warning. The schedule for 'Cloud Infrastructure Migration' is becoming compressed. Work remaining is 4 hours.",
+      "status": "success"
+    },
+    {
+      "timestamp": "2026-06-28T23:03:46.028812",
+      "event_type": "SURVIVAL_COLLAPSE",
+      "task_id": "preset-hackathon",
+      "survival_score": 42,
+      "confidence": 91,
+      "expected_imp": 22,
+      "actions_taken": [
+        "Priority Elevated",
+        "Voice Warning Issued"
+      ],
+      "spoken_text": "Critical risk. Your estimated work exceeds remaining productive hours. Completing a milestone immediately is required.",
+      "status": "success"
+    },
+    {
+      "timestamp": "2026-06-28T23:04:19.766943",
+      "event_type": "SURVIVAL_COLLAPSE",
+      "task_id": "preset-pitch",
+      "survival_score": 60,
+      "confidence": 91,
+      "expected_imp": 22,
+      "actions_taken": [
+        "Priority Elevated",
+        "Voice Warning Issued"
+      ],
+      "spoken_text": "Critical risk. Your estimated work exceeds remaining productive hours. Completing a milestone immediately is required.",
+      "status": "success"
+    },
+    {
+      "timestamp": "2026-06-28T23:05:15.640462",
+      "event_type": "SURVIVAL_COLLAPSE",
+      "task_id": "preset-hackathon",
+      "survival_score": 6,
+      "confidence": 91,
+      "expected_imp": 22,
+      "actions_taken": [
+        "Priority Elevated",
+        "Voice Warning Issued"
+      ],
+      "spoken_text": "Critical risk. Your estimated work exceeds remaining productive hours. Completing a milestone immediately is required.",
+      "status": "success"
+    },
+    {
+      "timestamp": "2026-06-28T23:08:17.820146",
+      "event_type": "SURVIVAL_COLLAPSE",
+      "task_id": "preset-cloud",
+      "survival_score": 60,
+      "confidence": 91,
+      "expected_imp": 22,
+      "actions_taken": [
+        "Priority Elevated",
+        "Voice Warning Issued"
+      ],
+      "spoken_text": "Assertive alert. Immediate focused action is now recommended on 'Cloud Infrastructure Migration'.",
+      "status": "success"
+    },
+    {
+      "timestamp": "2026-06-28T23:11:15.534553",
+      "event_type": "SURVIVAL_COLLAPSE",
+      "task_id": "preset-hackathon",
+      "survival_score": 30,
+      "confidence": 91,
+      "expected_imp": 22,
+      "actions_taken": [
+        "Priority Elevated",
+        "Voice Warning Issued"
+      ],
+      "spoken_text": "Critical risk. Your estimated work exceeds remaining productive hours. Completing a milestone immediately is required.",
+      "status": "success"
+    },
+    {
+      "timestamp": "2026-06-28T23:12:20.618739",
+      "event_type": "SURVIVAL_COLLAPSE",
+      "task_id": "preset-pitch",
+      "survival_score": 42,
+      "confidence": 91,
+      "expected_imp": 22,
+      "actions_taken": [
+        "Priority Elevated",
+        "Voice Warning Issued"
+      ],
+      "spoken_text": "Critical risk. Your estimated work exceeds remaining productive hours. Completing a milestone immediately is required.",
+      "status": "success"
+    },
+    {
+      "timestamp": "2026-06-28T23:12:45.632640",
+      "event_type": "SURVIVAL_COLLAPSE",
+      "task_id": "preset-hackathon",
+      "survival_score": 30,
+      "confidence": 91,
+      "expected_imp": 22,
+      "actions_taken": [
+        "Priority Elevated",
+        "Voice Warning Issued"
+      ],
+      "spoken_text": "Critical risk. Your estimated work exceeds remaining productive hours. Completing a milestone immediately is required.",
+      "status": "success"
+    },
+    {
+      "timestamp": "2026-06-28T23:13:47.762753",
+      "event_type": "SURVIVAL_COLLAPSE",
+      "task_id": "preset-cloud",
+      "survival_score": 42,
+      "confidence": 91,
+      "expected_imp": 22,
+      "actions_taken": [
+        "Priority Elevated",
+        "Voice Warning Issued"
+      ],
+      "spoken_text": "Critical risk. Your estimated work exceeds remaining productive hours. Completing a milestone immediately is required.",
+      "status": "success"
+    },
+    {
+      "timestamp": "2026-06-28T23:14:45.684163",
+      "event_type": "SURVIVAL_COLLAPSE",
+      "task_id": "preset-hackathon",
+      "survival_score": 30,
+      "confidence": 91,
+      "expected_imp": 22,
+      "actions_taken": [
+        "Priority Elevated",
+        "Voice Warning Issued"
+      ],
+      "spoken_text": "Critical risk. Your estimated work exceeds remaining productive hours. Completing a milestone immediately is required.",
+      "status": "success"
+    },
+    {
+      "timestamp": "2026-06-28T23:18:45.559581",
+      "event_type": "SURVIVAL_COLLAPSE",
+      "task_id": "77d650fa-d0bd-461f-9198-d2ae34ed1441",
+      "survival_score": 42,
+      "confidence": 91,
+      "expected_imp": 22,
+      "actions_taken": [
+        "Priority Elevated",
+        "Voice Warning Issued"
+      ],
+      "spoken_text": "Operational alert. You are beginning to fall behind on 'hackathon'.",
+      "status": "success"
+    },
+    {
+      "timestamp": "2026-06-28T23:20:15.580282",
+      "event_type": "SURVIVAL_COLLAPSE",
+      "task_id": "77d650fa-d0bd-461f-9198-d2ae34ed1441",
+      "survival_score": 32,
+      "confidence": 91,
+      "expected_imp": 22,
+      "actions_taken": [
+        "Priority Elevated",
+        "Voice Warning Issued"
+      ],
+      "spoken_text": "Warning. The schedule for 'hackathon' is becoming compressed. Work remaining is 5 hours.",
+      "status": "success"
+    },
+    {
+      "timestamp": "2026-06-28T23:21:45.537849",
+      "event_type": "SURVIVAL_COLLAPSE",
+      "task_id": "77d650fa-d0bd-461f-9198-d2ae34ed1441",
+      "survival_score": 50,
+      "confidence": 91,
+      "expected_imp": 22,
+      "actions_taken": [
+        "Priority Elevated",
+        "Voice Warning Issued"
+      ],
+      "spoken_text": "Assertive alert. Immediate focused action is now recommended on 'hackathon'.",
+      "status": "success"
+    },
+    {
+      "timestamp": "2026-06-28T23:24:15.892972",
+      "event_type": "SURVIVAL_COLLAPSE",
+      "task_id": "77d650fa-d0bd-461f-9198-d2ae34ed1441",
+      "survival_score": 40,
+      "confidence": 91,
+      "expected_imp": 22,
+      "actions_taken": [
+        "Priority Elevated",
+        "Voice Warning Issued"
+      ],
+      "spoken_text": "Critical risk. Your estimated work exceeds remaining productive hours. Completing a milestone immediately is required.",
+      "status": "success"
+    },
+    {
+      "timestamp": "2026-06-28T23:27:15.679274",
+      "event_type": "SURVIVAL_COLLAPSE",
+      "task_id": "77d650fa-d0bd-461f-9198-d2ae34ed1441",
+      "survival_score": 40,
+      "confidence": 91,
+      "expected_imp": 22,
+      "actions_taken": [
+        "Priority Elevated",
+        "Voice Warning Issued"
+      ],
+      "spoken_text": "Critical risk. Your estimated work exceeds remaining productive hours. Completing a milestone immediately is required.",
+      "status": "success"
+    },
+    {
+      "timestamp": "2026-06-28T23:30:45.644315",
+      "event_type": "SURVIVAL_COLLAPSE",
+      "task_id": "77d650fa-d0bd-461f-9198-d2ae34ed1441",
+      "survival_score": 42,
+      "confidence": 91,
+      "expected_imp": 22,
+      "actions_taken": [
+        "Priority Elevated",
+        "Voice Warning Issued"
+      ],
+      "spoken_text": "Critical risk. Your estimated work exceeds remaining productive hours. Completing a milestone immediately is required.",
+      "status": "success"
+    },
+    {
+      "timestamp": "2026-06-28T23:32:15.604845",
+      "event_type": "SURVIVAL_COLLAPSE",
+      "task_id": "77d650fa-d0bd-461f-9198-d2ae34ed1441",
+      "survival_score": 40,
+      "confidence": 91,
+      "expected_imp": 22,
+      "actions_taken": [
+        "Priority Elevated",
+        "Voice Warning Issued"
+      ],
+      "spoken_text": "Critical risk. Your estimated work exceeds remaining productive hours. Completing a milestone immediately is required.",
+      "status": "success"
+    }
+  ]
+}
