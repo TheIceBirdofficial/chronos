@@ -3213,13 +3213,20 @@ Start the final response with "IDENTITY SCAN COMPLETE". (The final profile summa
                         Audio notifications bridge interface for real-time temporal alerts.
                       </p>
                       {!voiceDaemonOnline && (
-                        <a
-                          href="/chronos_voice_daemon.exe"
-                          download="chronos_voice_daemon.exe"
-                          className="block text-[8px] text-[#66FCF1] underline font-mono hover:text-[#0099FF] transition-colors mt-1.5 font-bold"
-                        >
-                          ⬇️ Download Voice Daemon (Windows EXE)
-                        </a>
+                        <div className="space-y-1 mt-1.5">
+                          {showDownloadPrompt && (
+                            <p className="text-[8px] text-amber-400 font-mono animate-pulse">
+                              No local daemon found. Download the voice daemon below.
+                            </p>
+                          )}
+                          <a
+                            href="/chronos_voice_daemon.exe"
+                            download="chronos_voice_daemon.exe"
+                            className="block text-[8px] text-[#66FCF1] underline font-mono hover:text-[#0099FF] transition-colors font-bold"
+                          >
+                            ⬇️ Download Voice Daemon (Windows EXE)
+                          </a>
+                        </div>
                       )}
                     </div>
                     
@@ -3233,23 +3240,6 @@ Start the final response with "IDENTITY SCAN COMPLETE". (The final profile summa
                       </button>
                     )}
                   </div>
-                  
-                  {!voiceDaemonOnline && (
-                    <div className="p-3 rounded-xl bg-[#EF4444]/5 border border-[#EF4444]/15 text-[8px] font-mono text-red-300 space-y-1">
-                      <p className="font-bold uppercase">⚠️ Setup Required to Proceed:</p>
-                      {showDownloadPrompt ? (
-                        <p className="font-bold text-[#0099FF] animate-pulse">
-                          No exe file has been found. Download the voice daemon below.
-                        </p>
-                      ) : (
-                        <p>Launch the daemon to proceed. Click Launch above or run manually.</p>
-                      )}
-                      <p className="text-[7px] text-gray-500 mt-1">If using Python fallback:</p>
-                      <code className="block p-1 bg-black/40 rounded border border-white/5 text-gray-400 font-mono text-[7px] select-all">
-                        python voice_engine/voice_daemon_client.py
-                      </code>
-                    </div>
-                  )}
                 </div>
 
                 {/* 9. Advanced Connection Settings */}
