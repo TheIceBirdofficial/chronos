@@ -856,6 +856,7 @@ export default function Home() {
   const [hasMemory, setHasMemory] = useState(false);
   const [openHomeSettings, setOpenHomeSettings] = useState(false);
   const [mainOrbState, setMainOrbState] = useState<'idle' | 'listening' | 'thinking' | 'speaking' | 'offline'>('offline');
+  const [voiceDaemonOnline, setVoiceDaemonOnline] = useState(false);
   const [devOverrideState, setDevOverrideState] = useState<'idle' | 'listening' | 'thinking' | 'speaking' | 'offline' | null>(null);
   const [settingsTab, setSettingsTab] = useState<'ai' | 'phone' | 'twin' | 'dev'>('ai');
   const [sleepStart, setSleepStart] = useState<number>(23);
@@ -992,12 +993,15 @@ export default function Home() {
         if (!res.ok) throw new Error("Offline");
         const data = await res.json();
         
-        if (data.voice_link === 'offline') {
+        const isOnline = data.voice_link === 'online';
+        setVoiceDaemonOnline(isOnline);
+        if (!isOnline) {
           setMainOrbState(prev => prev !== 'offline' ? 'offline' : prev);
         } else {
           setMainOrbState(prev => prev === 'offline' ? 'idle' : prev);
         }
       } catch (err) {
+        setVoiceDaemonOnline(false);
         setMainOrbState(prev => prev !== 'offline' ? 'offline' : prev);
       }
     };
@@ -1361,13 +1365,32 @@ export default function Home() {
     }
   };
 
-  const handleSyncGoogleCalendarDirect = async (email: string) => {
-    const toastId = toast.loading(`Syncing Google Calendar events for ${email}...`);
+  const handleSpawnLocalDaemon = async () => {
+    const toastId = toast.loading("Launching local Voice Daemon subprocess...");
+    try {
+      const res = await fetch(`${API_BASE}/api/voice/start-local-daemon`, {
+        method: 'POST'
+      });
+      if (res.ok) {
+        toast.dismiss(toastId);
+        toast.success("Voice Daemon command spawned! Connecting...");
+      } else {
+        toast.dismiss(toastId);
+        toast.error("Failed to spawn local Voice Daemon. Make sure you run 'python voice_engine/voice_link.py' manually.");
+      }
+    } catch (e) {
+      toast.dismiss(toastId);
+      toast.error("Failed to spawn local Voice Daemon. Make sure you run 'python voice_engine/voice_link.py' manually.");
+    }
+  };
+
+  const handleSyncGoogleCalendarDirect = async () => {
+    const toastId = toast.loading("Syncing Google Calendar events...");
     try {
       const res = await fetch(`${API_BASE}/api/calendar/sync`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ email, frontend_origin: window.location.origin })
+        body: JSON.stringify({ frontend_origin: window.location.origin })
       });
       if (res.ok) {
         const data = await res.json();
@@ -1388,33 +1411,24 @@ export default function Home() {
   };
 
   const handleSyncGoogleCalendar = async () => {
-    const email = prompt("Enter the Google Account Email associated with your Google Calendar:");
-    if (!email) return; // User cancelled
-    if (!email.includes("@")) {
-      toast.error("Please enter a valid Google Account email.");
-      return;
-    }
-
-    const toastId = toast.loading(`Syncing Google Calendar events for ${email}...`);
+    const toastId = toast.loading("Syncing Google Calendar events...");
     try {
       const res = await fetch(`${API_BASE}/api/calendar/sync`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ email, frontend_origin: window.location.origin })
+        body: JSON.stringify({ frontend_origin: window.location.origin })
       });
       if (res.ok) {
         const data = await res.json();
         if (data.status === 'auth_required') {
           toast.dismiss(toastId);
-          // Open authorization window popup
           const popup = window.open(data.url, 'ChronosGoogleAuth', 'width=600,height=700');
           
-          // Setup message listener
           const handleAuthMessage = async (e: MessageEvent) => {
             if (e.data && e.data.type === 'CHRONOS_GCAL_AUTH_SUCCESS') {
               window.removeEventListener('message', handleAuthMessage);
               toast.success("Google Calendar authenticated! Fetching events...");
-              await handleSyncGoogleCalendarDirect(email);
+              await handleSyncGoogleCalendarDirect();
             }
           };
           window.addEventListener('message', handleAuthMessage);
@@ -3178,10 +3192,51 @@ Start the final response with "IDENTITY SCAN COMPLETE". (The final profile summa
                   </p>
                 </div>
 
-                {/* 8. Advanced Connection Settings */}
+                {/* 8. Local Voice Daemon Setup (Mandatory) */}
+                <div className="space-y-2 pt-2 border-t border-white/5 animate-in fade-in duration-300">
+                  <label className="block text-xs font-semibold uppercase tracking-wider text-gray-400">
+                    8. Local Voice Daemon Setup (Mandatory)
+                  </label>
+                  
+                  <div className="flex items-center justify-between p-3 rounded-xl bg-white/5 border border-white/10">
+                    <div className="space-y-1">
+                      <div className="flex items-center gap-2">
+                        <span className={`w-2 h-2 rounded-full ${voiceDaemonOnline ? 'bg-emerald-400 animate-pulse' : 'bg-red-400 animate-pulse'}`} />
+                        <span className="text-[10px] font-mono uppercase tracking-wider text-gray-300">
+                          Status: {voiceDaemonOnline ? 'Connected' : 'Offline'}
+                        </span>
+                      </div>
+                      <p className="text-[8px] text-gray-500 font-mono">
+                        Audio notifications bridge interface for real-time temporal alerts.
+                      </p>
+                    </div>
+                    
+                    {!voiceDaemonOnline && (
+                      <button
+                        type="button"
+                        onClick={handleSpawnLocalDaemon}
+                        className="px-3 py-1.5 rounded-lg bg-[#0099FF]/20 border border-[#0099FF]/40 text-[#66FCF1] hover:bg-[#0099FF]/30 transition-all font-mono text-[8px] uppercase tracking-wider cursor-pointer font-bold"
+                      >
+                        ⚡ Launch Daemon
+                      </button>
+                    )}
+                  </div>
+                  
+                  {!voiceDaemonOnline && (
+                    <div className="p-3 rounded-xl bg-[#EF4444]/5 border border-[#EF4444]/15 text-[8px] font-mono text-red-300 space-y-1">
+                      <p className="font-bold uppercase">⚠️ Setup Required to Proceed:</p>
+                      <p>Run locally using Python:</p>
+                      <code className="block p-1 bg-black/40 rounded border border-white/5 text-gray-400 font-mono text-[7px] select-all">
+                        python voice_engine/voice_link.py
+                      </code>
+                    </div>
+                  )}
+                </div>
+
+                {/* 9. Advanced Connection Settings */}
                 <details className="group border border-gray-800 rounded-lg p-2.5 bg-[#1F2833]/15 transition-all">
                   <summary className="text-[10px] font-bold uppercase tracking-widest text-gray-400 cursor-pointer list-none flex justify-between items-center select-none">
-                    <span>8. Advanced Connection Settings</span>
+                    <span>9. Advanced Connection Settings</span>
                     <span className="text-[8px] text-[#06C6B3] opacity-60 group-open:rotate-180 transition-transform duration-200">▼</span>
                   </summary>
                   <div className="mt-3 pt-2 border-t border-gray-800/60">
@@ -3203,9 +3258,9 @@ Start the final response with "IDENTITY SCAN COMPLETE". (The final profile summa
                 <div className="pt-4">
                   <button
                     type="submit"
-                    disabled={connectionStatus === 'offline'}
+                    disabled={connectionStatus === 'offline' || !voiceDaemonOnline}
                     className={`w-full py-4 rounded-2xl font-bold uppercase tracking-widest transition-all text-xs cursor-pointer ${
-                      connectionStatus === 'offline'
+                      (connectionStatus === 'offline' || !voiceDaemonOnline)
                         ? 'bg-gray-800 border border-gray-700 text-gray-500 cursor-not-allowed'
                         : 'bg-gradient-to-r from-[#06C6B3] to-[#8A2BE2] hover:opacity-90 text-white shadow-[0_0_20px_rgba(6,198,179,0.25)]'
                     }`}
@@ -3214,7 +3269,9 @@ Start the final response with "IDENTITY SCAN COMPLETE". (The final profile summa
                       ? 'Checking Connection...'
                       : connectionStatus === 'offline'
                         ? 'Core Offline (Reverify above)'
-                        : 'Apply Config & Begin Diagnostics'}
+                        : !voiceDaemonOnline
+                          ? 'Waiting for Voice Daemon Setup...'
+                          : 'Apply Config & Begin Diagnostics'}
                   </button>
                 </div>
               </form>

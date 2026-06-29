@@ -2686,6 +2686,28 @@ def voice_status():
         "is_speaking": is_speaking
     })
 
+@app.route('/api/voice/start-local-daemon', methods=['POST'])
+def start_local_daemon():
+    try:
+        import subprocess
+        import sys
+        # Path to voice_link.py in voice_engine folder
+        script_path = os.path.join(os.path.dirname(__file__), 'voice_engine', 'voice_link.py')
+        if not os.path.exists(script_path):
+            # Try parent directory fallback
+            script_path = os.path.join(os.path.dirname(__file__), '..', 'voice_engine', 'voice_link.py')
+            
+        if os.path.exists(script_path):
+            print(f"[Voice Automation] Spawning local voice daemon: {script_path}", flush=True)
+            # Spawn the subprocess asynchronously without waiting for it
+            subprocess.Popen([sys.executable, script_path], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            return jsonify({"status": "spawning"})
+        else:
+            return jsonify({"error": f"Script not found at {script_path}"}), 404
+    except Exception as e:
+        print(f"[Voice Automation Error] Failed to launch daemon: {e}", flush=True)
+        return jsonify({"error": str(e)}), 500
+
 @app.route('/api/voice/mute', methods=['POST'])
 def mute_voice():
     global voice_muted, voice_muted_until

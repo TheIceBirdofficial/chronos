@@ -1636,13 +1636,13 @@ Consider the operator's digital twin profile: ${performanceTwin}.${tasksInfo}`;
     }
   };
 
-  const handleSyncGoogleCalendarDirect = async (email: string) => {
-    const toastId = toast.loading(`Syncing Google Calendar events for ${email}...`);
+  const handleSyncGoogleCalendarDirect = async () => {
+    const toastId = toast.loading("Syncing Google Calendar events...");
     try {
       const res = await fetch(`${API_BASE}/api/calendar/sync`, {
         method: "POST",
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ email, frontend_origin: window.location.origin })
+        body: JSON.stringify({ frontend_origin: window.location.origin })
       });
       if (!res.ok) throw new Error();
       const data = await res.json();
@@ -1660,34 +1660,25 @@ Consider the operator's digital twin profile: ${performanceTwin}.${tasksInfo}`;
   };
 
   const handleSyncGoogleCalendar = async () => {
-    const email = prompt("Enter the Google Account Email associated with your Google Calendar:");
-    if (!email) return; // User cancelled
-    if (!email.includes("@")) {
-      toast.error("Please enter a valid Google Account email.");
-      return;
-    }
-
-    const toastId = toast.loading(`Syncing Google Calendar events for ${email}...`);
+    const toastId = toast.loading("Syncing Google Calendar events...");
     try {
       const res = await fetch(`${API_BASE}/api/calendar/sync`, {
         method: "POST",
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ email, frontend_origin: window.location.origin })
+        body: JSON.stringify({ frontend_origin: window.location.origin })
       });
       if (!res.ok) throw new Error();
       const data = await res.json();
       
       if (data.status === 'auth_required') {
         toast.dismiss(toastId);
-        // Open authorization window
         const popup = window.open(data.url, 'ChronosGoogleAuth', 'width=600,height=700');
         
-        // Setup message listener
         const handleAuthMessage = async (e: MessageEvent) => {
           if (e.data && e.data.type === 'CHRONOS_GCAL_AUTH_SUCCESS') {
             window.removeEventListener('message', handleAuthMessage);
             toast.success("Google Calendar authenticated! Fetching events...");
-            await handleSyncGoogleCalendarDirect(email);
+            await handleSyncGoogleCalendarDirect();
           }
         };
         window.addEventListener('message', handleAuthMessage);
