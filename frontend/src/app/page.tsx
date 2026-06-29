@@ -3,6 +3,7 @@
 import { useState, useEffect, useRef } from 'react';
 import { useRouter } from 'next/navigation';
 import ChronosCanvas from '@/components/ChronosCanvas';
+import { API_BASE } from "@/config";
 
 // Analog Clock SVG component for the first "O"
 function ClockO({ size = '0.9em', color = '#06C6B3', glowColor = 'rgba(6, 198, 179, 0.42)', isWarpActive = false }: { size?: number | string; color?: string; glowColor?: string; isWarpActive?: boolean }) {
@@ -894,7 +895,7 @@ export default function Home() {
   // Load saved config and username on mount
   useEffect(() => {
     // Fetch backend settings (username, sleep hours)
-    fetch("http://localhost:5000/api/settings")
+    fetch(`${API_BASE}/api/settings`)
       .then(res => {
         if (!res.ok) throw new Error();
         return res.json();
@@ -932,40 +933,12 @@ export default function Home() {
     }
   }, []);
 
-  // Global keypress listener for double backtick (`) mute
-  useEffect(() => {
-    let lastPress = 0;
-    const handleKeyDown = (e: KeyboardEvent) => {
-      if (
-        document.activeElement?.tagName === 'INPUT' ||
-        document.activeElement?.tagName === 'TEXTAREA'
-      ) {
-        return;
-      }
-      if (e.key === '`') {
-        const now = Date.now();
-        if (now - lastPress < 500) {
-          e.preventDefault();
-          fetch("http://localhost:5000/api/voice/mute", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ duration: 600 })
-          })
-          .then(res => res.json())
-          .catch(err => console.warn("Failed to mute reminders", err));
-        }
-        lastPress = now;
-      }
-    };
-    window.addEventListener('keydown', handleKeyDown);
-    return () => window.removeEventListener('keydown', handleKeyDown);
-  }, []);
 
   useEffect(() => {
     const checkVoiceStatus = async () => {
       if (devOverrideStateRef.current !== null) return;
       try {
-        const res = await fetch("http://localhost:5000/api/voice/status");
+        const res = await fetch(`${API_BASE}/api/voice/status`);
         if (!res.ok) throw new Error("Offline");
         const data = await res.json();
         
@@ -985,7 +958,7 @@ export default function Home() {
   }, []);
 
   useEffect(() => {
-    const eventSource = new EventSource("http://localhost:5000/api/voice/events");
+    const eventSource = new EventSource(`${API_BASE}/api/voice/events`);
 
     eventSource.onmessage = (event) => {
       if (devOverrideStateRef.current !== null) return;
@@ -1212,7 +1185,7 @@ export default function Home() {
     localStorage.setItem('chronos-username', username);
     
     try {
-      await fetch("http://localhost:5000/api/settings", {
+      await fetch(`${API_BASE}/api/settings`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -1310,7 +1283,7 @@ export default function Home() {
     window.scrollTo({ top: 0, behavior: 'smooth' });
 
     try {
-      await fetch("http://localhost:5000/api/settings", {
+      await fetch(`${API_BASE}/api/settings`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -1345,7 +1318,7 @@ export default function Home() {
           apiUrl: aiConfig.apiUrl,
           apiKey: aiConfig.apiKey || '',
         });
-        const res = await fetch(`http://localhost:5000/api/ai/models?${queryParams.toString()}`);
+        const res = await fetch(`${API_BASE}/api/ai/models?${queryParams.toString()}`);
         if (!res.ok) throw new Error("Verification request failed");
         const data = await res.json();
         
@@ -1528,7 +1501,7 @@ If something fails, treat it like a historical event.
 If something succeeds, act shocked.`;
 
     try {
-      const res = await fetch('http://localhost:5000/api/ai/chat', {
+      const res = await fetch(`${API_BASE}/api/ai/chat`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -1683,7 +1656,7 @@ Start the final response with "IDENTITY SCAN COMPLETE". (The final profile summa
         });
       }
 
-      const res = await fetch('http://localhost:5000/api/ai/chat', {
+      const res = await fetch(`${API_BASE}/api/ai/chat`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -1813,7 +1786,7 @@ Start the final response with "IDENTITY SCAN COMPLETE". (The final profile summa
 
         // Sync everything to the backend immediately!
         try {
-          fetch("http://localhost:5000/api/settings", {
+          fetch(`${API_BASE}/api/settings`, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({
@@ -2234,7 +2207,7 @@ Start the final response with "IDENTITY SCAN COMPLETE". (The final profile summa
                         }
                         localStorage.setItem('chronos-ai-config', JSON.stringify(aiConfig));
                         try {
-                          await fetch("http://localhost:5000/api/settings", {
+                          await fetch(`${API_BASE}/api/settings`, {
                             method: "POST",
                             headers: { "Content-Type": "application/json" },
                             body: JSON.stringify({
@@ -2395,7 +2368,7 @@ Start the final response with "IDENTITY SCAN COMPLETE". (The final profile summa
                         type="button"
                         onClick={() => {
                           setDevOverrideState(null);
-                          fetch("http://localhost:5000/api/voice/status")
+                          fetch(`${API_BASE}/api/voice/status`)
                             .then(res => {
                               if (!res.ok) throw new Error();
                               return res.json();
@@ -2588,7 +2561,7 @@ Start the final response with "IDENTITY SCAN COMPLETE". (The final profile summa
               onClick={async (e) => {
                 e.preventDefault();
                 try {
-                  await fetch("http://localhost:5000/api/settings", {
+                  await fetch(`${API_BASE}/api/settings`, {
                     method: "POST",
                     headers: { "Content-Type": "application/json" },
                     body: JSON.stringify({

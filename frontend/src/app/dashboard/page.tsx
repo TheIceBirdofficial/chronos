@@ -766,7 +766,12 @@ export default function Dashboard() {
   // Dynamic Model Fetching & Connectivity Validation in Settings
   useEffect(() => {
     const provider = openSettings ? settingsProvider : (aiConfig?.provider || 'gemini');
-    const apiUrl = openSettings ? (settingsProvider === 'gemini' ? 'https://generativelanguage.googleapis.com/v1beta' : settingsApiUrl) : (aiConfig?.apiUrl || 'https://generativelanguage.googleapis.com/v1beta');
+    const defaultApiUrl = provider === 'gemini' 
+      ? 'https://generativelanguage.googleapis.com/v1beta' 
+      : (provider === 'nvidia' ? 'https://integrate.api.nvidia.com/v1' : 'http://localhost:11434');
+    const apiUrl = openSettings 
+      ? (settingsProvider === 'gemini' ? 'https://generativelanguage.googleapis.com/v1beta' : settingsApiUrl) 
+      : (aiConfig?.apiUrl || defaultApiUrl);
     const apiKey = openSettings ? settingsApiKey : (aiConfig?.apiKey || '');
 
     let active = true;
@@ -785,7 +790,7 @@ export default function Dashboard() {
           apiUrl: apiUrl,
           apiKey: apiKey || '',
         });
-        const res = await fetch(`http://localhost:5000/api/ai/models?${queryParams.toString()}`);
+        const res = await fetch(`${API_BASE}/api/ai/models?${queryParams.toString()}`);
         if (!res.ok) throw new Error("Verification request failed");
         const data = await res.json();
         
@@ -1422,7 +1427,7 @@ Generate the tactical calendar debrief now.`;
       if (target) {
         setTerminalHistory(prev => [...prev, { sender: 'chronos', text: `Executing Intervention: Applying Recovery Protocol to "${target.title}".` }]);
         try {
-          const res = await fetch(`http://localhost:5000/api/tasks/${target.id}/rescue`, {
+          const res = await fetch(`${API_BASE}/api/tasks/${target.id}/rescue`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ twinProfile: performanceTwin })
@@ -1780,7 +1785,7 @@ Consider the operator's digital twin profile: ${performanceTwin}.${tasksInfo}`;
     try {
       if (briefingTaskId) {
         // Unlock existing Google Calendar task
-        const res = await fetch(`http://localhost:5000/api/tasks/${briefingTaskId}`, {
+        const res = await fetch(`${API_BASE}/api/tasks/${briefingTaskId}`, {
           method: "PUT",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
@@ -1860,7 +1865,7 @@ Consider the operator's digital twin profile: ${performanceTwin}.${tasksInfo}`;
 
   const deleteTask = async (id: string) => {
     try {
-      await fetch(`http://localhost:5000/api/tasks/${id}`, {
+      await fetch(`${API_BASE}/api/tasks/${id}`, {
         method: "DELETE"
       });
       const filtered = tasks.filter(t => t.id !== id);
@@ -1873,7 +1878,7 @@ Consider the operator's digital twin profile: ${performanceTwin}.${tasksInfo}`;
 
   const handleToggleComplete = async (task: Task) => {
     try {
-      const res = await fetch(`http://localhost:5000/api/tasks/${task.id}`, {
+      const res = await fetch(`${API_BASE}/api/tasks/${task.id}`, {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ completed: !task.completed, twinProfile: performanceTwin })
@@ -1895,7 +1900,7 @@ Consider the operator's digital twin profile: ${performanceTwin}.${tasksInfo}`;
     setRecoveryChatHistory([]);
 
     try {
-      const res = await fetch(`http://localhost:5000/api/tasks/${task.id}/rescue`, {
+      const res = await fetch(`${API_BASE}/api/tasks/${task.id}/rescue`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ twinProfile: performanceTwin, aiConfig: aiConfig })
@@ -1993,7 +1998,7 @@ Always format your responses with the modified checklist inside a JSON-like arra
                 }
               };
               // Persist checklist to this task in local database
-              fetch(`http://localhost:5000/api/tasks/${prev.id}`, {
+              fetch(`${API_BASE}/api/tasks/${prev.id}`, {
                 method: "PUT",
                 headers: { "Content-Type": "application/json" },
                 body: JSON.stringify({ rescueResources: updated.rescueResources })
@@ -4870,7 +4875,7 @@ Your current plan is achievable if no major integration issues occur. Avoid intr
             <button
               onClick={async () => {
                 try {
-                  const res = await fetch(`http://localhost:5000/api/tasks/${deadTask.id}/acknowledge_collapse`, {
+                  const res = await fetch(`${API_BASE}/api/tasks/${deadTask.id}/acknowledge_collapse`, {
                     method: 'POST'
                   });
                   if (res.ok) {

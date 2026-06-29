@@ -55,8 +55,9 @@ try:
             if prediction[key] >= 0.5:
                 print(f"⚡ Wake word detected: {key} (confidence: {prediction[key]:.2f})")
                 try:
-                    # Notify the Chronos local backend server
-                    requests.post("http://localhost:5000/api/voice/trigger", json={"status": "listening"})
+                    # Notify the Chronos backend server
+                    api_url = os.environ.get("CHRONOS_API_URL", "http://localhost:5000").rstrip("/")
+                    requests.post(f"{api_url}/api/voice/trigger", json={"status": "listening"})
                     # Wait to prevent double-firing
                     time.sleep(2.0)
                 except Exception as err:

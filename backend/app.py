@@ -12,6 +12,10 @@ def make_local_request(method, url, **kwargs):
     session.trust_env = False
     kwargs['proxies'] = {}
     
+    headers = kwargs.get('headers', {})
+    headers['ngrok-skip-browser-warning'] = '69420'
+    kwargs['headers'] = headers
+    
     parsed = urllib.parse.urlparse(url)
     urls = []
     if parsed.netloc:

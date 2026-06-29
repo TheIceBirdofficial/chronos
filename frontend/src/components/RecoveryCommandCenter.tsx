@@ -67,7 +67,7 @@ export default function RecoveryCommandCenter({ taskId }: { taskId: string }) {
       localStorage.setItem(startTimeKey, Date.now().toString());
     }
     // Load status
-    fetch(`http://localhost:5000/api/recovery/status?taskId=${taskId}`)
+    fetch(`${API_BASE}/api/recovery/status?taskId=${taskId}`)
       .then(res => res.json())
       .then(data => {
         setStatus(data);
@@ -164,7 +164,7 @@ Always format your responses with the modified checklist inside a JSON-like arra
             });
 
             // Sync checklist updates back to database task
-            await fetch(`http://localhost:5000/api/tasks/${taskId}`, {
+            await fetch(`${API_BASE}/api/tasks/${taskId}`, {
               method: "PUT",
               headers: { "Content-Type": "application/json" },
               body: JSON.stringify({
@@ -210,7 +210,7 @@ Always format your responses with the modified checklist inside a JSON-like arra
       }
       setDurationMinutes(calculatedMinutes);
 
-      const res = await fetch(`http://localhost:5000/api/recovery/complete`, {
+      const res = await fetch(`${API_BASE}/api/recovery/complete`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ taskId })
