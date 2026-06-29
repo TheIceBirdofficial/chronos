@@ -1013,6 +1013,20 @@ export default function Home() {
   }, []);
 
   useEffect(() => {
+    let interval: NodeJS.Timeout;
+    const sendHeartbeat = async () => {
+      try {
+        await fetch('http://127.0.0.1:43210/heartbeat', { mode: 'cors' });
+      } catch (e) {
+        // Ignore connection failures when daemon is not running
+      }
+    };
+    sendHeartbeat();
+    interval = setInterval(sendHeartbeat, 3000);
+    return () => clearInterval(interval);
+  }, []);
+
+  useEffect(() => {
     const eventSource = new EventSource(`${API_BASE}/api/voice/events`);
 
     eventSource.onmessage = (event) => {
@@ -1384,6 +1398,26 @@ export default function Home() {
       toast.dismiss(toastId);
       toast.error("Failed to spawn local Voice Daemon. Make sure you run it manually.");
       setShowDownloadPrompt(true);
+    }
+  };
+
+  const handleChangeGoogleAccount = async () => {
+    const toastId = toast.loading("Resetting calendar link...");
+    try {
+      const res = await fetch(`${API_BASE}/api/calendar/logout`, {
+        method: 'POST'
+      });
+      if (res.ok) {
+        toast.dismiss(toastId);
+        toast.info("Calendar token reset. Connecting to Google OAuth...");
+        await handleSyncGoogleCalendar();
+      } else {
+        toast.dismiss(toastId);
+        toast.error("Failed to reset Google Calendar account.");
+      }
+    } catch (e) {
+      toast.dismiss(toastId);
+      toast.error("Failed to reset Google Calendar account.");
     }
   };
 
@@ -3163,13 +3197,23 @@ Start the final response with "IDENTITY SCAN COMPLETE". (The final profile summa
                   <label className="block text-xs font-semibold uppercase tracking-wider text-gray-400">
                     6. Google Calendar Integration (Optional)
                   </label>
-                  <button
-                    type="button"
-                    onClick={handleSyncGoogleCalendar}
-                    className="w-full py-3 rounded-xl border border-[#06C6B3]/40 text-[#66FCF1] hover:bg-[#06C6B3]/10 transition-all font-mono text-[10px] uppercase tracking-widest cursor-pointer font-bold shadow-[0_0_15px_rgba(6,198,179,0.1)]"
-                  >
-                    📅 Sync Google Calendar Events →
-                  </button>
+                  <div className="flex gap-2">
+                    <button
+                      type="button"
+                      onClick={handleSyncGoogleCalendar}
+                      className="flex-1 py-3 rounded-xl border border-[#06C6B3]/40 text-[#66FCF1] hover:bg-[#06C6B3]/10 transition-all font-mono text-[10px] uppercase tracking-widest cursor-pointer font-bold shadow-[0_0_15px_rgba(6,198,179,0.1)]"
+                    >
+                      📅 Sync Calendar Events →
+                    </button>
+                    <button
+                      type="button"
+                      onClick={handleChangeGoogleAccount}
+                      className="px-3 py-3 rounded-xl border border-white/10 text-gray-400 hover:text-white hover:bg-white/5 transition-all font-mono text-[10px] uppercase tracking-widest cursor-pointer font-bold shrink-0"
+                      title="Change Google Account"
+                    >
+                      🔄 Change Account
+                    </button>
+                  </div>
                   <p className="text-[8px] text-gray-500 font-mono italic">
                     Locks your calendar events into Chronos to shield them from scheduling conflicts.
                   </p>

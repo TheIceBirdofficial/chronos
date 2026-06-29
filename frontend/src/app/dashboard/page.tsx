@@ -581,6 +581,20 @@ export default function Dashboard() {
     return () => clearInterval(interval);
   }, []);
 
+  useEffect(() => {
+    let interval: NodeJS.Timeout;
+    const sendHeartbeat = async () => {
+      try {
+        await fetch('http://127.0.0.1:43210/heartbeat', { mode: 'cors' });
+      } catch (e) {
+        // Ignore connection failures when daemon is not running
+      }
+    };
+    sendHeartbeat();
+    interval = setInterval(sendHeartbeat, 3000);
+    return () => clearInterval(interval);
+  }, []);
+
   // Server-Sent Events listener for voice assistant commands and wakeup
   useEffect(() => {
     const eventSource = new EventSource(`${API_BASE}/api/voice/events`);
@@ -1656,6 +1670,26 @@ Consider the operator's digital twin profile: ${performanceTwin}.${tasksInfo}`;
     } catch (e) {
       toast.dismiss(toastId);
       toast.error("Google Calendar sync failed.");
+    }
+  };
+
+  const handleChangeGoogleAccount = async () => {
+    const toastId = toast.loading("Resetting calendar link...");
+    try {
+      const res = await fetch(`${API_BASE}/api/calendar/logout`, {
+        method: "POST"
+      });
+      if (res.ok) {
+        toast.dismiss(toastId);
+        toast.info("Calendar token reset. Connecting to Google OAuth...");
+        await handleSyncGoogleCalendar();
+      } else {
+        toast.dismiss(toastId);
+        toast.error("Failed to reset Google Calendar account.");
+      }
+    } catch (e) {
+      toast.dismiss(toastId);
+      toast.error("Failed to reset Google Calendar account.");
     }
   };
 
@@ -4715,13 +4749,23 @@ Your current plan is achievable if no major integration issues occur. Avoid intr
                       >
                         ⚡ Load Demo Presets
                       </button>
-                      <button
-                        type="button"
-                        onClick={handleSyncGoogleCalendar}
-                        className="flex-1 px-3 py-2.5 bg-blue-500/20 border border-blue-500 text-blue-300 font-mono text-[9px] rounded-xl hover:bg-blue-500/35 transition-all cursor-pointer"
-                      >
-                        🗓️ Sync Google Calendar
-                      </button>
+                      <div className="flex-1 flex gap-1.5">
+                        <button
+                          type="button"
+                          onClick={handleSyncGoogleCalendar}
+                          className="flex-1 px-3 py-2.5 bg-blue-500/20 border border-blue-500 text-blue-300 font-mono text-[9px] rounded-xl hover:bg-blue-500/35 transition-all cursor-pointer"
+                        >
+                          🗓️ Sync Calendar
+                        </button>
+                        <button
+                          type="button"
+                          onClick={handleChangeGoogleAccount}
+                          className="px-2.5 py-2.5 bg-white/5 border border-white/10 text-gray-400 font-mono text-[9px] rounded-xl hover:bg-white/10 hover:text-white transition-all cursor-pointer shrink-0"
+                          title="Change Google Account"
+                        >
+                          🔄 Reset
+                        </button>
+                      </div>
                     </div>
                   </div>
                 </div>

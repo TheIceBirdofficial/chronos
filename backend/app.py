@@ -3112,6 +3112,16 @@ def auth_google_callback():
     </html>
     """
 
+@app.route('/api/calendar/logout', methods=['POST'])
+def calendar_logout():
+    tokens_file = os.path.join(os.path.dirname(__file__), 'google_tokens.json')
+    if os.path.exists(tokens_file):
+        try:
+            os.remove(tokens_file)
+        except Exception as e:
+            return jsonify({"error": str(e)}), 500
+    return jsonify({"status": "logged_out"})
+
 @app.route('/api/calendar/sync', methods=['POST'])
 def calendar_sync():
     import datetime
@@ -3126,7 +3136,6 @@ def calendar_sync():
         return jsonify({"status": "auth_required", "url": auth_url})
         
     tasks = load_tasks_db()
-    today = datetime.datetime.now()
     
     cal_tasks = []
     
@@ -3159,7 +3168,6 @@ def calendar_sync():
         if due_str.endswith('Z'):
             clean_due = due_str
         elif '+' in due_str or '-' in due_str:
-            # Keep offset
             pass
         else:
             clean_due = due_str + 'Z'
@@ -3177,46 +3185,11 @@ def calendar_sync():
             "category": json.dumps({"locked_intake": True, "aiSummary": [], "completedCheckpoints": []})
         })
         
-    # Merge mock exams if actual events are empty, ensuring high fidelity demo
-    if len(cal_tasks) == 0:
-        days_to_friday = (4 - today.weekday()) % 7
-        if days_to_friday == 0: days_to_friday = 7
-        due_friday = (today + datetime.timedelta(days=days_to_friday)).replace(hour=14, minute=0, second=0).isoformat() + "Z"
-        
-        days_to_monday = (7 - today.weekday()) % 7
-        if days_to_monday == 0: days_to_monday = 7
-        due_monday = (today + datetime.timedelta(days=days_to_monday)).replace(hour=9, minute=0, second=0).isoformat() + "Z"
-        
-        cal_tasks.extend([
-            {
-                "id": "gcal-chemistry-exam",
-                "title": "Chemistry Exam Prep",
-                "due": due_friday,
-                "estimatedHours": 4.0,
-                "importance": "high",
-                "completed": False,
-                "survivalScore": 60,
-                "escalationLevel": "yellow",
-                "category": json.dumps({"locked_intake": True, "aiSummary": [], "completedCheckpoints": []})
-            },
-            {
-                "id": "gcal-physics-exam",
-                "title": "Physics Exam Prep",
-                "due": due_monday,
-                "estimatedHours": 5.0,
-                "importance": "high",
-                "completed": False,
-                "survivalScore": 75,
-                "escalationLevel": "green",
-                "category": json.dumps({"locked_intake": True, "aiSummary": [], "completedCheckpoints": []})
-            }
-        ])
-        
     count = 0
     for ct in cal_tasks:
         if not any(t['id'] == ct['id'] for t in tasks):
-            ct_eval = evaluate_task(ct)
-            save_task_db(ct_eval)
+            # Bypass slow evaluate_task call to fix latency completely
+            save_task_db(ct)
             count += 1
             
     if count > 0:

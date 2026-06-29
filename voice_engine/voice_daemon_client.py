@@ -14,6 +14,9 @@ API_URLS = [
     'https://chronos-backend-410257364704.europe-west1.run.app'
 ]
 
+# Track browser tab heartbeats
+last_heartbeat = time.time()
+
 def speak(text):
     print(f'[Speech] Speaking: {text}')
     # Clean text to avoid quotes breaking powershell
@@ -67,11 +70,18 @@ class DaemonRequestHandler(BaseHTTPRequestHandler):
         self.end_headers()
 
     def do_GET(self):
+        global last_heartbeat
         if self.path == '/status':
             self.send_response(200)
             self.send_header('Content-Type', 'application/json')
             self.end_headers()
             self.wfile.write(json.dumps({'status': 'online', 'service': 'chronos-voice-daemon'}).encode('utf-8'))
+        elif self.path == '/heartbeat':
+            last_heartbeat = time.time()
+            self.send_response(200)
+            self.send_header('Content-Type', 'application/json')
+            self.end_headers()
+            self.wfile.write(json.dumps({'status': 'acknowledged'}).encode('utf-8'))
         else:
             self.send_response(404)
             self.end_headers()
@@ -80,6 +90,19 @@ def run_local_server():
     server = HTTPServer(('127.0.0.1', 43210), DaemonRequestHandler)
     print('[Daemon] Local CORS API server listening on http://127.0.0.1:43210')
     server.serve_forever()
+
+def monitor_browser_presence():
+    global last_heartbeat
+    # 15s initial grace period for browser to connect/handshake
+    time.sleep(15)
+    while True:
+        if time.time() - last_heartbeat > 10.0:
+            print('[Daemon] No active browser tab detected. Terminating process.')
+            # Speak shutdown message
+            ps_cmd = "Add-Type -AssemblyName System.Speech; (New-Object System.Speech.Synthesis.SpeechSynthesizer).Speak('Chronos voice bridge closed')"
+            subprocess.run(['powershell', '-Command', ps_cmd], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            os._exit(0)
+        time.sleep(2)
 
 if __name__ == '__main__':
     print('=== CHRONOS VOICE COORDINATION DAEMON ===')
@@ -92,5 +115,8 @@ if __name__ == '__main__':
     for url in API_URLS:
         threading.Thread(target=stream_events, args=(url,), daemon=True).start()
         
+    # Run browser presence monitor
+    threading.Thread(target=monitor_browser_presence, daemon=True).start()
+    
     # Start local HTTP server
     run_local_server()
