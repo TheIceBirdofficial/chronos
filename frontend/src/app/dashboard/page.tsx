@@ -1615,10 +1615,19 @@ Consider the operator's digital twin profile: ${performanceTwin}.${tasksInfo}`;
   };
 
   const handleSyncGoogleCalendar = async () => {
-    const toastId = toast.loading("Syncing Google Calendar events...");
+    const email = prompt("Enter the Google Account Email associated with your Google Calendar:");
+    if (!email) return; // User cancelled
+    if (!email.includes("@")) {
+      toast.error("Please enter a valid Google Account email.");
+      return;
+    }
+
+    const toastId = toast.loading(`Syncing Google Calendar events for ${email}...`);
     try {
       const res = await fetch(`${API_BASE}/api/calendar/sync`, {
-        method: "POST"
+        method: "POST",
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email })
       });
       if (!res.ok) throw new Error();
       const data = await res.json();

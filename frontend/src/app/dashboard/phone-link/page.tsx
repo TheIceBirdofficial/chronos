@@ -33,10 +33,11 @@ export default function PhoneLinkPage() {
   const [isTransitioning, setIsTransitioning] = useState(true);
 
   useEffect(() => {
-    // Route Guard: Prevent skipping onboarding
+    // Route Guard: Allow if onboarding is in progress OR twin exists
     const savedName = localStorage.getItem("chronos-username");
     const savedTwin = localStorage.getItem("chronos-performance-twin");
-    if (!savedName || !savedTwin) {
+    const onboardingInProgress = localStorage.getItem("chronos-onboarding-in-progress") === "true";
+    if (!savedTwin && !onboardingInProgress) {
       router.push('/');
       return;
     }
@@ -154,7 +155,10 @@ export default function PhoneLinkPage() {
       {/* Navigation Header */}
       <header className="fixed top-0 left-0 right-0 z-50 h-16 flex items-center px-8 gap-6 bg-black/40 backdrop-blur-md border-b border-white/5">
         <button
-          onClick={() => router.push('/dashboard')}
+          onClick={() => {
+            const onboardingInProgress = localStorage.getItem("chronos-onboarding-in-progress") === "true";
+            router.push(onboardingInProgress ? '/' : '/dashboard');
+          }}
           className="text-[9px] font-mono tracking-widest uppercase text-gray-500 hover:text-gray-300 cursor-pointer transition-colors"
         >
           ← Return to Control

@@ -813,6 +813,7 @@ export default function Home() {
   }, []);
 
   const navigateTo = (path: string) => {
+    localStorage.removeItem("chronos-onboarding-in-progress");
     setIsTransitioning(true);
     setTimeout(() => {
       router.push(path);
@@ -1356,10 +1357,19 @@ export default function Home() {
   };
 
   const handleSyncGoogleCalendar = async () => {
-    const toastId = toast.loading("Syncing Google Calendar events...");
+    const email = prompt("Enter the Google Account Email associated with your Google Calendar:");
+    if (!email) return; // User cancelled
+    if (!email.includes("@")) {
+      toast.error("Please enter a valid Google Account email.");
+      return;
+    }
+
+    const toastId = toast.loading(`Syncing Google Calendar events for ${email}...`);
     try {
       const res = await fetch(`${API_BASE}/api/calendar/sync`, {
         method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email })
       });
       if (res.ok) {
         const data = await res.json();
@@ -3108,7 +3118,10 @@ Start the final response with "IDENTITY SCAN COMPLETE". (The final profile summa
                   </label>
                   <button
                     type="button"
-                    onClick={() => router.push('/dashboard/phone-link')}
+                    onClick={() => {
+                      localStorage.setItem("chronos-onboarding-in-progress", "true");
+                      router.push('/dashboard/phone-link');
+                    }}
                     className="w-full py-3 rounded-xl border border-[#0099FF]/40 text-[#66FCF1] hover:bg-[#0099FF]/10 transition-all font-mono text-[10px] uppercase tracking-widest cursor-pointer font-bold shadow-[0_0_15px_rgba(0,153,255,0.1)]"
                   >
                     📱 Configure & Verify Phone Link →

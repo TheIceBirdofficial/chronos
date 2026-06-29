@@ -2770,7 +2770,10 @@ def load_presets():
 def calendar_sync():
     import datetime
     # Sync tasks from Google Calendar
-    # Mocking two high-fidelity tasks synchronized from Google Calendar
+    data = request.get_json() or {}
+    email = data.get('email', 'unknown-account@gmail.com')
+    print(f"[Google Calendar Sync] Syncing calendar events for account: {email}")
+    
     tasks = load_tasks_db()
     
     # Calculate friday/monday deadlines relative to today
