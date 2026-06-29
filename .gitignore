@@ -28,6 +28,13 @@ Thumbs.db
 
 # Misc
 coverage/
+
+# PyInstaller / Voice Daemon build artifacts (dist & build never committed)
+dist/
+build/
+*.spec
+voice_engine/voice_daemon_exe_entry.py
+
 dist/
 build/
 .cache/

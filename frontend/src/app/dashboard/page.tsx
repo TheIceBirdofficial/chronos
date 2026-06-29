@@ -318,7 +318,7 @@ export default function Dashboard() {
   }, [terminalHistory]);
 
   // Tabbed Settings & Custom Calendar picker states
-  const [settingsTab, setSettingsTab] = useState<'ai' | 'phone' | 'twin' | 'dev'>('ai');
+  const [settingsTab, setSettingsTab] = useState<'ai' | 'tools' | 'twin' | 'dev'>('ai');
   const [sleepStart, setSleepStart] = useState<number>(23);
   const [sleepEnd, setSleepEnd] = useState<number>(7);
   const [ntfyTopic, setNtfyTopic] = useState<string>("chronos-alerts-user");
@@ -4314,12 +4314,12 @@ Your current plan is achievable if no major integration issues occur. Avoid intr
               </button>
               <button
                 type="button"
-                onClick={() => setSettingsTab('phone')}
+                onClick={() => setSettingsTab('tools')}
                 className={`pb-1 text-xs font-bold uppercase tracking-wider transition-all focus:outline-none cursor-pointer ${
-                  settingsTab === 'phone' ? 'text-[#8A2BE2] border-b-2 border-[#8A2BE2]' : 'text-gray-500 hover:text-gray-300'
+                  settingsTab === 'tools' ? 'text-[#8A2BE2] border-b-2 border-[#8A2BE2]' : 'text-gray-500 hover:text-gray-300'
                 }`}
               >
-                Phone Link
+                Tools
               </button>
               <button
                 type="button"
@@ -4531,25 +4531,54 @@ Your current plan is achievable if no major integration issues occur. Avoid intr
                 </div>
               )}
 
-              {settingsTab === 'phone' && (
-                <div className="space-y-4 text-left py-2 flex flex-col items-center text-center">
-                  <h3 className="text-xs font-bold uppercase tracking-widest text-[#0099FF] border-b border-white/5 pb-1 w-full text-left mb-2">
-                    📱 Phone Link Synchronization
+              {settingsTab === 'tools' && (
+                <div className="space-y-4 text-left py-2">
+                  <h3 className="text-xs font-bold uppercase tracking-widest text-[#06C6B3] border-b border-white/5 pb-1">
+                    🛠️ Tools
                   </h3>
-                  <span className="text-3xl block select-none">🔗</span>
-                  <p className="text-[10px] text-gray-400 font-sans max-w-xs leading-relaxed">
-                    Set up out-of-band notifications on your mobile device. Get real-time warnings from Chronos when your timelines begin to collapse.
-                  </p>
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setOpenSettings(false);
-                      router.push('/dashboard/phone-link');
-                    }}
-                    className="w-full mt-2 py-3 rounded-xl bg-gradient-to-r from-blue-600 to-[#0099FF] hover:opacity-95 text-black font-mono font-bold text-[10px] uppercase tracking-wider transition-all cursor-pointer shadow-[0_0_15px_rgba(0,153,255,0.25)] border border-transparent"
-                  >
-                    🚀 Open Phone Link Setup Wizard →
-                  </button>
+
+                  {/* Google Calendar */}
+                  <div className="space-y-2">
+                    <span className="block text-[10px] text-[#06C6B3] uppercase font-bold">Google Calendar</span>
+                    <div className="flex gap-2">
+                      <button
+                        type="button"
+                        onClick={handleSyncGoogleCalendar}
+                        className="flex-1 py-2.5 rounded-xl border border-[#06C6B3]/40 text-[#66FCF1] hover:bg-[#06C6B3]/10 transition-all font-mono text-[9px] uppercase tracking-widest cursor-pointer font-bold shadow-[0_0_10px_rgba(6,198,179,0.1)]"
+                      >
+                        📅 Sync Calendar
+                      </button>
+                      <button
+                        type="button"
+                        onClick={handleChangeGoogleAccount}
+                        className="px-3 py-2.5 rounded-xl border border-white/10 text-gray-400 hover:text-white hover:bg-white/5 transition-all font-mono text-[9px] uppercase tracking-widest cursor-pointer font-bold shrink-0"
+                        title="Change Google Account"
+                      >
+                        🔄 Reset
+                      </button>
+                    </div>
+                    <p className="text-[8px] text-gray-500 font-mono italic">
+                      Sync locks your calendar events into Chronos. Reset clears OAuth tokens to change accounts.
+                    </p>
+                  </div>
+
+                  {/* Phone Link */}
+                  <div className="space-y-2 pt-2 border-t border-white/5">
+                    <span className="block text-[10px] text-[#0099FF] uppercase font-bold">📱 Phone Link</span>
+                    <p className="text-[10px] text-gray-400 font-sans leading-relaxed">
+                      Set up out-of-band notifications on your mobile device. Get real-time warnings when timelines collapse.
+                    </p>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setOpenSettings(false);
+                        router.push('/dashboard/phone-link');
+                      }}
+                      className="w-full py-2.5 rounded-xl bg-gradient-to-r from-blue-600 to-[#0099FF] hover:opacity-95 text-black font-mono font-bold text-[9px] uppercase tracking-wider transition-all cursor-pointer shadow-[0_0_15px_rgba(0,153,255,0.2)] border border-transparent"
+                    >
+                      🚀 Open Phone Link Setup Wizard →
+                    </button>
+                  </div>
                 </div>
               )}
 
@@ -4736,36 +4765,6 @@ Your current plan is achievable if no major integration issues occur. Avoid intr
                       >
                         🚨 Force Timeline Collapse
                       </button>
-                    </div>
-                  </div>
-
-                  <div className="space-y-2 pt-2 border-t border-white/5">
-                    <span className="block text-[10px] text-[#66FCF1] uppercase">Developer Preset & Sync triggers:</span>
-                    <div className="flex gap-2">
-                      <button
-                        type="button"
-                        onClick={handleLoadPresets}
-                        className="flex-1 px-3 py-2.5 bg-purple-500/20 border border-purple-500 text-purple-300 font-mono text-[9px] rounded-xl hover:bg-purple-500/35 transition-all cursor-pointer"
-                      >
-                        ⚡ Load Demo Presets
-                      </button>
-                      <div className="flex-1 flex gap-1.5">
-                        <button
-                          type="button"
-                          onClick={handleSyncGoogleCalendar}
-                          className="flex-1 px-3 py-2.5 bg-blue-500/20 border border-blue-500 text-blue-300 font-mono text-[9px] rounded-xl hover:bg-blue-500/35 transition-all cursor-pointer"
-                        >
-                          🗓️ Sync Calendar
-                        </button>
-                        <button
-                          type="button"
-                          onClick={handleChangeGoogleAccount}
-                          className="px-2.5 py-2.5 bg-white/5 border border-white/10 text-gray-400 font-mono text-[9px] rounded-xl hover:bg-white/10 hover:text-white transition-all cursor-pointer shrink-0"
-                          title="Change Google Account"
-                        >
-                          🔄 Reset
-                        </button>
-                      </div>
                     </div>
                   </div>
                 </div>

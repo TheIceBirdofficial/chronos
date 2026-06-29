@@ -1,4 +1,5 @@
 # Chronos Voice Daemon Client
+# Production build - connects to cloud backend only
 import os
 import sys
 import time
@@ -6,22 +7,51 @@ import json
 import threading
 import subprocess
 import urllib.request
+from pathlib import Path
 from http.server import HTTPServer, BaseHTTPRequestHandler
 
-# API URLs to ping and stream
+# Production backend only - no localhost
 API_URLS = [
-    'http://localhost:5000',
     'https://chronos-backend-410257364704.europe-west1.run.app'
 ]
 
 # Track browser tab heartbeats
 last_heartbeat = time.time()
 
+# Kokoro ONNX TTS Setup
+home_dir = Path.home()
+KOKORO_MODEL_PATH = os.environ.get('KOKORO_MODEL_PATH', str(home_dir / 'kokoro_previews' / 'kokoro-v1.0.onnx'))
+KOKORO_VOICES_PATH = os.environ.get('KOKORO_VOICES_PATH', str(home_dir / 'kokoro_previews' / 'voices-v1.0.bin'))
+
+kokoro = None
+try:
+    from kokoro_onnx import Kokoro
+    if os.path.exists(KOKORO_MODEL_PATH) and os.path.exists(KOKORO_VOICES_PATH):
+        print(f'[TTS] Loading Kokoro engine from: {KOKORO_MODEL_PATH}')
+        kokoro = Kokoro(KOKORO_MODEL_PATH, KOKORO_VOICES_PATH)
+        print('[TTS] Kokoro engine initialized successfully.')
+    else:
+        print('[TTS] Kokoro model files not found. Using PowerShell TTS fallback.')
+except Exception as e:
+    print(f'[TTS] Kokoro init failed: {e}. Using PowerShell TTS fallback.')
+
+
 def speak(text):
-    print(f'[Speech] Speaking: {text}')
-    # Clean text to avoid quotes breaking powershell
-    clean_text = text.replace('"', '').replace("'", '')
-    ps_cmd = f"Add-Type -AssemblyName System.Speech; (New-Object System.Speech.Synthesis.SpeechSynthesizer).Speak('{clean_text}')"
+    clean_text = text.strip()
+    if not clean_text:
+        return
+    print(f'[Speech] Speaking: {clean_text}')
+    if kokoro is not None:
+        try:
+            import sounddevice as sd
+            data, sample_rate = kokoro.create(clean_text, voice='af_bella', speed=1.15, lang='en-us')
+            sd.play(data, sample_rate)
+            sd.wait()
+            return
+        except Exception as e:
+            print(f'[Kokoro error] {e} - falling back to PowerShell TTS')
+    ps_text = clean_text.replace('"', '').replace("'", '')
+    ps_cmd = f"Add-Type -AssemblyName System.Speech; (New-Object System.Speech.Synthesis.SpeechSynthesizer).Speak('{ps_text}')"
     subprocess.Popen(['powershell', '-Command', ps_cmd], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
 def ping_backend(url):
@@ -33,7 +63,7 @@ def ping_backend(url):
         pass
 
 def ping_loop():
-    print('[Daemon] Pinging backend endpoints...')
+    print('[Daemon] Pinging production backend...')
     while True:
         for url in API_URLS:
             ping_backend(url)
@@ -59,6 +89,8 @@ def stream_events(url):
             time.sleep(5)
 
 class DaemonRequestHandler(BaseHTTPRequestHandler):
+    def log_message(self, format, *args):
+        pass  # Suppress noisy HTTP logs
     def end_headers(self):
         self.send_header('Access-Control-Allow-Origin', '*')
         self.send_header('Access-Control-Allow-Methods', 'GET, POST, OPTIONS')
@@ -88,7 +120,7 @@ class DaemonRequestHandler(BaseHTTPRequestHandler):
 
 def run_local_server():
     server = HTTPServer(('127.0.0.1', 43210), DaemonRequestHandler)
-    print('[Daemon] Local CORS API server listening on http://127.0.0.1:43210')
+    print('[Daemon] Local API server listening on http://127.0.0.1:43210')
     server.serve_forever()
 
 def monitor_browser_presence():
@@ -97,10 +129,9 @@ def monitor_browser_presence():
     time.sleep(15)
     while True:
         if time.time() - last_heartbeat > 10.0:
-            print('[Daemon] No active browser tab detected. Terminating process.')
-            # Speak shutdown message
-            ps_cmd = "Add-Type -AssemblyName System.Speech; (New-Object System.Speech.Synthesis.SpeechSynthesizer).Speak('Chronos voice bridge closed')"
-            subprocess.run(['powershell', '-Command', ps_cmd], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            print('[Daemon] No browser heartbeat. Shutting down.')
+            speak('Chronos voice bridge closed')
+            time.sleep(2)
             os._exit(0)
         time.sleep(2)
 

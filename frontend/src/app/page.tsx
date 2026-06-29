@@ -1244,8 +1244,10 @@ export default function Home() {
   };
 
   const handleStartInitialization = () => {
+    const scrollY = window.scrollY;
     setStep('settings');
     setShowQuestions(true);
+    requestAnimationFrame(() => window.scrollTo(0, scrollY));
   };
 
   const handleSaveSettings = async (e: React.FormEvent) => {
@@ -1275,11 +1277,16 @@ export default function Home() {
       console.warn("Failed to sync settings during onboarding setup", err);
     }
     
+    // Lock scroll position so the page doesn't jump back to the hero on step change
+    const scrollY = window.scrollY;
     setStep('about');
+    requestAnimationFrame(() => window.scrollTo(0, scrollY));
   };
 
   const handleStartScan = () => {
+    const scrollY = window.scrollY;
     setStep('questions');
+    requestAnimationFrame(() => window.scrollTo(0, scrollY));
     startIdentityScan();
   };
 
