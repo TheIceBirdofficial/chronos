@@ -11,8 +11,8 @@
   "failureCount": 0,
   "streakCount": 0,
   "totalRecoveredHours": 0.0,
-  "aiProvider": "ollama",
-  "aiApiUrl": "http://localhost:11434",
+  "aiProvider": "gemini",
+  "aiApiUrl": "https://generativelanguage.googleapis.com/v1beta",
   "aiApiKey": "",
-  "aiModel": "gemma2:2b"
+  "aiModel": "gemini-1.5-flash"
 }

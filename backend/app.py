@@ -790,14 +790,6 @@ def query_ai_direct(provider, api_url, api_key, model, messages, timeout=30):
             res_data = response.json()
             return res_data['candidates'][0]['content']['parts'][0]['text']
 
-        elif provider == 'ollama':
-            url = api_url or 'http://localhost:11434'
-            if not url.endswith('/api/chat'):
-                url = url.rstrip('/') + '/api/chat'
-            payload = {"model": model or "llama3", "messages": messages, "stream": False, "options": {"temperature": 0.7}}
-            response = make_local_request('POST', url, json=payload, timeout=timeout)
-            response.raise_for_status()
-            return response.json().get('message', {}).get('content', '')
 
         elif provider == 'nvidia':
             url = f"{api_url or 'https://integrate.api.nvidia.com/v1'}/chat/completions"
@@ -933,42 +925,6 @@ def generate_dynamic_timeline(title, due_str, twin_profile="", ai_config=None):
                     return timeline
         except Exception as e:
             print(f"[Timeline Gen] AI supplier generation failed: {e}", flush=True)
-
-    # Try local Ollama as fallback
-    try:
-        url = 'http://localhost:11434/api/generate'
-        prompt = (
-            f"You are a master timeline partitioner. Current time is {now.strftime('%A, %d %b at %I:%M %p')}. "
-            f"Generate a task breakdown timeline of exactly 3 sequential phases for the task '{title}' which is due at {due.strftime('%A, %d %b at %I:%M %p')} ({total_hours:.1f} hours from now). "
-            f"User sleep schedule is from {sleep_start}:00 to {sleep_end}:00. Procrastination factor is {procrastination_rating}/10. "
-            f"User profile: {twin_profile}. "
-            f"Partition the time accurately. All phase scheduledTimes MUST fall outside the user's sleep window and be placed at highly productive hours. "
-            f"Respond with ONLY a raw JSON array of 3 objects, each having keys: 'title' (actionable, detailed subtask description) and 'scheduledTime' (formatted as 'Today at 8:00 PM', 'Tomorrow at 10:30 AM', etc.). "
-            f"Output ONLY the JSON array, no markdown, no explanation."
-        )
-        session = requests.Session()
-        session.trust_env = False
-        res = session.post(url, json={"model": "gemma2:2b", "prompt": prompt, "stream": False}, proxies={}, timeout=3)
-        if res.status_code == 200:
-            content = res.json().get('response', '').strip()
-            if '```' in content:
-                content = content.split('```')[1]
-                if content.startswith('json'):
-                    content = content[4:]
-                content = content.strip()
-            phases = json.loads(content)
-            if isinstance(phases, list) and len(phases) == 3:
-                timeline = []
-                for i, p in enumerate(phases):
-                    timeline.append({
-                        "id": f"m{i+1}",
-                        "title": p.get("title", f"Phase {i+1}"),
-                        "status": "pending",
-                        "scheduledTime": p.get("scheduledTime", "")
-                    })
-                return timeline
-    except Exception as e:
-        print(f"[Timeline Gen] Ollama generation failed, falling back to rule-based dynamic calculation: {e}", flush=True)
         
     p1_time = now + datetime.timedelta(hours=total_hours * 0.2)
     p2_time = now + datetime.timedelta(hours=total_hours * 0.6)
@@ -1083,7 +1039,7 @@ def run_autonomous_agent_decisions(task, level, survival_score, sleep_start, sle
                 step1 = f"Part A: Setup & prototyping for {old_title}"
                 step2 = f"Part B: Core implementation & testing of {old_title}"
                 
-                if ai_config and (ai_config.get('apiKey') or ai_config.get('provider') == 'ollama'):
+                if ai_config and ai_config.get('apiKey'):
                     try:
                         ai_prompt = f"""You are the Chronos Task Splitter. The operator is falling behind on task checkpoint "{old_title}". 
 Split this checkpoint into exactly 2 smaller, highly actionable, specific technical steps. 
@@ -1189,11 +1145,12 @@ Respond ONLY with a raw JSON array of 2 strings: ["Step 1", "Step 2"]."""
             f"Chronos has modified '{task.get('title')}' scheduling: {summary_details}. Immediate action required!"
         )
         try:
-            make_local_request("POST", "http://127.0.0.1:5000/api/voice/speak", json={
-                "text": f"Warning: Chronos autonomous intervention engaged for task: {task.get('title')}. Adjusting priority and timeline parameters."
-            }, timeout=3)
-        except Exception:
-            pass
+            # Bypass self-call HTTP requests to avoid hardcoded port issues
+            is_muted = voice_muted and (time.time() < voice_muted_until)
+            if not is_muted:
+                speech_queue.put(f"Warning: Chronos autonomous intervention engaged for task: {task.get('title')}. Adjusting priority and timeline parameters.")
+        except Exception as e:
+            print(f"[Voice Speak Direct Queue Error] {e}")
 
     task['events'] = events
     return task
@@ -1305,7 +1262,7 @@ def evaluate_task(task, twin_profile="", is_pulse=False):
     else:
         # Query AI config
         ai_config = get_ai_config_from_db()
-        if ai_config and (ai_config.get('apiKey') or ai_config.get('provider') == 'ollama'):
+        if ai_config and ai_config.get('apiKey'):
             try:
                 ai_prompt = f"""You are the Chronos Risk and Intervention Agent. Evaluate the procrastination risk of this task.
     
@@ -1740,7 +1697,7 @@ def rescue_task(tid):
     ai_timeline = None
     ai_no_return_offset = None  # hours before due
 
-    if ai_config and (ai_config.get('apiKey') or ai_config.get('provider') == 'ollama'):
+    if ai_config and ai_config.get('apiKey'):
         # Extract intake summary details
         import json
         ai_summary = task.get('category', '')
@@ -1973,7 +1930,7 @@ def complete_sprint(tid):
     new_twin_profile = twin_profile
     new_procrastination_rating = procrastination_rating
     
-    if ai_config and (ai_config.get('apiKey') or ai_config.get('provider') == 'ollama'):
+    if ai_config and ai_config.get('apiKey'):
         try:
             analysis_prompt = (
                 f"The user Akash has completed a session for task: '{task['title']}'\n"
@@ -2197,7 +2154,7 @@ def recovery_complete():
 @app.route('/api/ai/chat', methods=['POST'])
 def ai_chat():
     data = request.get_json()
-    provider = data.get('provider', 'ollama')
+    provider = data.get('provider', 'gemini')
     api_url = data.get('apiUrl')
     api_key = data.get('apiKey')
     model = data.get('model')
@@ -2206,13 +2163,8 @@ def ai_chat():
     try:
         if provider == 'gemini':
             active_key = api_key or os.environ.get('GEMINI_API_KEY')
-            if not active_key:
-                provider = 'ollama'
-            else:
+            if active_key:
                 api_key = active_key
-        
-        # Check provider again in case it fell back to ollama
-        if provider == 'gemini':
             
             contents = []
             system_instruction = None
@@ -2251,22 +2203,6 @@ def ai_chat():
             except (KeyError, IndexError):
                 content = f"Error parsing Gemini response: {res_data}"
                 
-            return jsonify({'content': content})
-
-        elif provider == 'ollama':
-            url = api_url or 'http://localhost:11434'
-            if not url.endswith('/api/chat'):
-                url = url.rstrip('/') + '/api/chat'
-            payload = {
-                "model": model or "llama3",
-                "messages": messages,
-                "stream": False,
-                "options": {"temperature": 0.7}
-            }
-            response = make_local_request('POST', url, json=payload, timeout=90)
-            response.raise_for_status()
-            res_data = response.json()
-            content = res_data.get('message', {}).get('content', '')
             return jsonify({'content': content})
             
         elif provider == 'nvidia':
@@ -2370,49 +2306,24 @@ def voice_query():
         if len(voice_conversation_history) > 10:
             voice_conversation_history = voice_conversation_history[-10:]
             
-        provider = "gemini" if os.environ.get("GEMINI_API_KEY") else "ollama"
-        model = "gemini-1.5-flash" if provider == "gemini" else "gemma2:2b"
+        ai_config = get_ai_config_from_db()
+        provider = ai_config.get('provider', 'gemini')
+        model = ai_config.get('model', 'gemini-1.5-flash')
+        api_url = ai_config.get('apiUrl')
+        api_key = ai_config.get('apiKey')
         
-        reply = ""
-        if provider == "gemini":
+        # If API key is not configured for Gemini, fall back to environment variable
+        if provider == 'gemini' and not api_key:
             api_key = os.environ.get("GEMINI_API_KEY")
-            contents = []
-            for msg in voice_conversation_history:
-                contents.append({
-                    "role": "user" if msg["role"] == "user" else "model",
-                    "parts": [{"text": msg["content"]}]
-                })
-            url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={api_key}"
-            payload = {
-                "contents": contents,
-                "systemInstruction": {"parts": [{"text": system_prompt}]}
-            }
-            res = requests.post(url, json=payload, timeout=10)
-            if res.status_code == 200:
-                res_data = res.json()
-                try:
-                    reply = res_data['candidates'][0]['content']['parts'][0]['text']
-                except Exception:
-                    reply = "Brief complete. Operator target updated."
-            else:
-                provider = "ollama"
-                
-        if provider == "ollama":
-            url = "http://localhost:11434/api/chat"
-            messages = [{"role": "system", "content": system_prompt}]
-            for msg in voice_conversation_history:
-                messages.append({"role": msg["role"], "content": msg["content"]})
-            payload = {
-                "model": model,
-                "messages": messages,
-                "stream": False
-            }
-            res = requests.post(url, json=payload, timeout=10)
-            if res.status_code == 200:
-                reply = res.json().get('message', {}).get('content', '')
-            else:
-                reply = "Tactical link offline. Manual input requested."
-                
+        
+        messages = [{"role": "system", "content": system_prompt}]
+        for msg in voice_conversation_history:
+            messages.append({"role": msg["role"], "content": msg["content"]})
+            
+        reply = query_ai_direct(provider, api_url, api_key, model, messages, timeout=15)
+        if not reply:
+            reply = "Tactical coordinator link offline. Manual input requested."
+            
         voice_conversation_history.append({"role": "assistant", "content": reply})
         return jsonify({"content": reply})
     except Exception as e:
@@ -2420,7 +2331,7 @@ def voice_query():
 
 @app.route('/api/ai/models', methods=['GET'])
 def list_models():
-    provider = request.args.get('provider', 'ollama')
+    provider = request.args.get('provider', 'gemini')
     api_url = request.args.get('apiUrl')
     api_key = request.args.get('apiKey')
     print(f"[DEBUG MODEL LIST] provider={provider}, api_url={api_url}, api_key={api_key}", flush=True)
@@ -2447,27 +2358,6 @@ def list_models():
         except Exception:
             pass
         return jsonify({'models': default_gemini_models, 'offline': True})
-
-    elif provider == 'ollama':
-        fallback_models = ['llama3', 'llama3.1', 'mistral', 'gemma', 'phi3']
-        url = (api_url or 'http://localhost:11434').rstrip('/') + '/api/tags'
-        try:
-            response = make_local_request('GET', url, timeout=3)
-            print(f"[DEBUG OLLAMA PING] url={url}, status_code={response.status_code}", flush=True)
-            if response.status_code == 200:
-                data = response.json()
-                models = [m['name'] for m in data.get('models', [])]
-                print(f"[DEBUG OLLAMA PING] found models={models}", flush=True)
-                if models:
-                    return jsonify({'models': models, 'offline': False})
-                else:
-                    print(f"[DEBUG OLLAMA PING] tags succeeded but models list is empty", flush=True)
-                    # Even if models list is empty, the service itself is online!
-                    return jsonify({'models': fallback_models, 'offline': False})
-        except Exception as e:
-            print(f"[DEBUG OLLAMA ERROR] error={e}", flush=True)
-            pass
-        return jsonify({'models': fallback_models, 'offline': True})
         
     elif provider == 'nvidia':
         default_nim_models = [
@@ -2771,16 +2661,21 @@ def handle_settings():
         cursor.execute("SELECT * FROM settings WHERE id = 'active_operator'")
         row = cursor.fetchone()
         conn.close()
-        if row:
-            return jsonify(dict(row))
-            
-        # Fallback to file settings if SQLite row is missing
+        res_data = dict(row) if row else {}
+        
+        # Merge with settings.json to get fields not stored in SQLite (like AI Config options)
         if os.path.exists(settings_file):
             try:
                 with open(settings_file, 'r') as f:
-                    return jsonify(json.load(f))
+                    file_settings = json.load(f)
+                    for k, v in file_settings.items():
+                        if k not in res_data or res_data[k] is None or res_data[k] == '':
+                            res_data[k] = v
             except Exception:
                 pass
+        
+        if res_data:
+            return jsonify(res_data)
         return jsonify({"username": "user", "twinProfile": "", "sleepStart": 23, "sleepEnd": 7, "ntfyTopic": "chronos-alerts-user", "procrastinationRating": 8.0})
 
 @app.route('/api/tasks/presets/load', methods=['POST'])
