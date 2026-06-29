@@ -42,3 +42,9 @@ temp/
 *.swp
 *.zip
 *.jar
+
+# Google OAuth Secrets
+secrets.json
+google_tokens.json
+backend/secrets.json
+backend/google_tokens.json

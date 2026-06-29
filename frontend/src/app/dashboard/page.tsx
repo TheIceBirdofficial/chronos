@@ -110,6 +110,7 @@ export default function Dashboard() {
   const router = useRouter();
   const [isTransitioning, setIsTransitioning] = useState(true);
   const [tasks, setTasks] = useState<Task[]>([]);
+  const [tasksLoading, setTasksLoading] = useState(true);
 
   const getDynamicFailureCauses = (task: Task) => {
     const causes: string[] = [];
@@ -218,6 +219,24 @@ export default function Dashboard() {
   const [suggestedEstimate, setSuggestedEstimate] = useState<number | null>(null);
   const [hasCompletedAiEstimation, setHasCompletedAiEstimation] = useState(false);
   const [isAddingTask, setIsAddingTask] = useState(false);
+  const [loaderProgress, setLoaderProgress] = useState(0);
+
+  useEffect(() => {
+    if (!estChatLoading) {
+      setLoaderProgress(100);
+      return;
+    }
+    setLoaderProgress(0);
+    const interval = setInterval(() => {
+      setLoaderProgress(prev => {
+        if (prev >= 95) {
+          return prev + (98 - prev) * 0.05;
+        }
+        return prev + 1.8;
+      });
+    }, 150);
+    return () => clearInterval(interval);
+  }, [estChatLoading]);
 
   // Explainability Panel (Why am I seeing this?)
   const [explainTaskId, setExplainTaskId] = useState<string | null>(null);
@@ -620,6 +639,7 @@ export default function Dashboard() {
   };
 
   const fetchTasks = async () => {
+    setTasksLoading(true);
     try {
       const res = await fetch(`${API_BASE}/api/tasks`);
       if (!res.ok) throw new Error("API core offline");
@@ -632,6 +652,8 @@ export default function Dashboard() {
       if (savedTasks) {
         setTasks(JSON.parse(savedTasks));
       }
+    } finally {
+      setTasksLoading(false);
     }
   };
 
@@ -1614,6 +1636,29 @@ Consider the operator's digital twin profile: ${performanceTwin}.${tasksInfo}`;
     }
   };
 
+  const handleSyncGoogleCalendarDirect = async (email: string) => {
+    const toastId = toast.loading(`Syncing Google Calendar events for ${email}...`);
+    try {
+      const res = await fetch(`${API_BASE}/api/calendar/sync`, {
+        method: "POST",
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email, frontend_origin: window.location.origin })
+      });
+      if (!res.ok) throw new Error();
+      const data = await res.json();
+      toast.dismiss(toastId);
+      if (data.count > 0) {
+        toast.success(`Synced Google Calendar: Imported ${data.count} Locked Exams.`);
+      } else {
+        toast.info("Google Calendar is up to date.");
+      }
+      fetchTasks();
+    } catch (e) {
+      toast.dismiss(toastId);
+      toast.error("Google Calendar sync failed.");
+    }
+  };
+
   const handleSyncGoogleCalendar = async () => {
     const email = prompt("Enter the Google Account Email associated with your Google Calendar:");
     if (!email) return; // User cancelled
@@ -1627,17 +1672,34 @@ Consider the operator's digital twin profile: ${performanceTwin}.${tasksInfo}`;
       const res = await fetch(`${API_BASE}/api/calendar/sync`, {
         method: "POST",
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ email })
+        body: JSON.stringify({ email, frontend_origin: window.location.origin })
       });
       if (!res.ok) throw new Error();
       const data = await res.json();
-      toast.dismiss(toastId);
-      if (data.count > 0) {
-        toast.success(`Synced Google Calendar: Imported ${data.count} Locked Exams.`);
+      
+      if (data.status === 'auth_required') {
+        toast.dismiss(toastId);
+        // Open authorization window
+        const popup = window.open(data.url, 'ChronosGoogleAuth', 'width=600,height=700');
+        
+        // Setup message listener
+        const handleAuthMessage = async (e: MessageEvent) => {
+          if (e.data && e.data.type === 'CHRONOS_GCAL_AUTH_SUCCESS') {
+            window.removeEventListener('message', handleAuthMessage);
+            toast.success("Google Calendar authenticated! Fetching events...");
+            await handleSyncGoogleCalendarDirect(email);
+          }
+        };
+        window.addEventListener('message', handleAuthMessage);
       } else {
-        toast.info("Google Calendar is up to date.");
+        toast.dismiss(toastId);
+        if (data.count > 0) {
+          toast.success(`Synced Google Calendar: Imported ${data.count} Locked Exams.`);
+        } else {
+          toast.info("Google Calendar is up to date.");
+        }
+        fetchTasks();
       }
-      fetchTasks();
     } catch (e) {
       toast.dismiss(toastId);
       toast.error("Google Calendar sync failed.");
@@ -2687,6 +2749,10 @@ Your current plan is achievable if no major integration issues occur. Avoid intr
         .border-l-transparent {
           border-left-color: transparent !important;
         }
+        @keyframes scannerSweep {
+          0% { left: -100%; }
+          100% { left: 150%; }
+        }
       `}</style>
       
       {/* Floating stardust background (Fixed viewport outside transition wrapper) */}
@@ -3142,7 +3208,26 @@ Your current plan is achievable if no major integration issues occur. Avoid intr
               </span>
             </div>
 
-            {tasks.length === 0 ? (
+            {tasksLoading ? (
+              <div className="flex-1 flex flex-col items-center justify-center p-8 bg-[#0B0C10]/60 border border-gray-900/40 rounded-3xl backdrop-blur-sm space-y-4">
+                <div className="relative w-16 h-16 flex items-center justify-center">
+                  <div className="absolute inset-0 rounded-full border border-[#66FCF1]/20 animate-pulse" />
+                  <div className="absolute inset-1 rounded-full border-t-2 border-r-2 border-[#0099FF] animate-spin" />
+                  <span className="text-xl animate-pulse">🛡️</span>
+                </div>
+                <div className="text-center space-y-2">
+                  <p className="text-[10px] font-mono text-[#66FCF1] uppercase tracking-widest animate-pulse">
+                    Scanning active temporal targets...
+                  </p>
+                  <p className="text-[8px] font-mono text-gray-500 uppercase tracking-wider animate-pulse">
+                    Querying defense nodes and survival indexes
+                  </p>
+                </div>
+                <div className="w-48 h-[3px] bg-white/5 rounded-full overflow-hidden relative">
+                  <div className="absolute top-0 bottom-0 left-0 bg-gradient-to-r from-[#0099FF] to-[#8A2BE2] w-1/3 rounded-full animate-[scannerSweep_1.8s_ease-in-out_infinite]" />
+                </div>
+              </div>
+            ) : tasks.length === 0 ? (
               <div className="flex-1 flex flex-col items-center justify-center text-center p-8 bg-[#0B0C10]/60 border border-dashed border-gray-800 rounded-3xl backdrop-blur-sm">
                 <span className="text-3xl block mb-3">🛡️</span>
                 <p className="text-xs text-gray-500 uppercase tracking-widest font-bold">
@@ -3960,101 +4045,209 @@ Your current plan is achievable if no major integration issues occur. Avoid intr
 
             {/* AI Summarizer Core Panel on the Right */}
             {showEstimationAssistant && (
-              <div className="w-full max-w-sm bg-black/80 border border-white/[0.08] rounded-3xl p-6 shadow-[0_8px_32px_0_rgba(138,43,226,0.3)] backdrop-blur-xl flex flex-col justify-between animate-in slide-in-from-left-5 duration-300 min-h-[450px]">
-                <div className="flex flex-col h-full space-y-4">
-                  <div className="flex justify-between items-start pb-2 border-b border-gray-900 flex-shrink-0">
-                    <div>
-                      <h2 className="text-sm font-bold uppercase tracking-wider text-[#06C6B3]">
-                        AI Summarizer Core
-                      </h2>
-                      <p className="text-[8px] text-gray-500 uppercase tracking-widest mt-0.5">
-                        Calibrating temporal effort requirements
-                      </p>
+              <div className="w-full max-w-sm bg-black/80 border border-white/[0.08] rounded-3xl p-6 shadow-[0_8px_32px_0_rgba(138,43,226,0.3)] backdrop-blur-xl flex flex-col justify-between animate-in slide-in-from-left-5 duration-300 min-h-[450px] relative overflow-hidden">
+                {estChatLoading ? (
+                  <div className="flex flex-col h-full justify-between space-y-4 animate-in fade-in duration-300">
+                    <div className="flex justify-between items-center pb-2 border-b border-white/5 flex-shrink-0">
+                      <div>
+                        <h2 className="text-xs font-bold uppercase tracking-wider text-[#06C6B3] flex items-center gap-1.5 animate-pulse">
+                          <span className="w-1.5 h-1.5 rounded-full bg-[#06C6B3] animate-ping" />
+                          Mission Analysis Active
+                        </h2>
+                        <p className="text-[8px] text-gray-500 uppercase tracking-widest mt-0.5 font-mono">
+                          Core Telemetry Calibration
+                        </p>
+                      </div>
+                      <div className="text-[10px] font-mono text-[#8A2BE2] font-bold">
+                        {Math.round(loaderProgress)}%
+                      </div>
                     </div>
-                    <button
-                      type="button"
-                      onClick={() => setShowEstimationAssistant(false)}
-                      className="text-gray-400 hover:text-gray-250 text-xs focus:outline-none font-bold"
-                    >
-                      ✕
-                    </button>
-                  </div>
 
-                  {/* Chat Messages */}
-                  <div className="flex-1 overflow-y-auto space-y-3 pr-1 min-h-[200px] max-h-[300px] custom-scrollbar text-xs">
-                    {estChatHistory.map((msg, idx) => (
-                      <div key={idx} className={`group relative p-3 rounded-2xl border transition-all duration-300 ${
-                        msg.role === 'user'
-                          ? 'bg-[#8A2BE2]/10 border-[#8A2BE2]/20 text-purple-200 ml-12 text-right select-text cursor-text'
-                          : 'bg-white/5 border-white/[0.04] text-gray-300 mr-12 text-left select-none'
-                      }`}>
-                        <span className={`block text-[8px] uppercase tracking-wider mb-1 ${
-                          msg.role === 'user' ? 'text-purple-400' : 'text-[#06C6B3]'
-                        }`}>
-                          {msg.role === 'user' ? username : 'Estimation Core'}
-                        </span>
-                        <div className="space-y-1 select-text">{renderFormattedText(msg.content)}</div>
-                        {msg.role === 'user' && (
-                          <button
-                            type="button"
-                            onClick={() => setEstChatInput(msg.content)}
-                            title="Copy message back to input box to edit or resend"
-                            className="absolute left-2 top-1.5 opacity-0 group-hover:opacity-100 transition-opacity bg-black/80 border border-white/15 hover:bg-[#8A2BE2]/30 text-[7px] font-mono text-purple-300 px-1.5 py-0.5 rounded cursor-pointer uppercase tracking-widest"
-                          >
-                            🔄 Resend
-                          </button>
-                        )}
+                    <div className="relative w-full h-[60px] bg-white/5 rounded-2xl border border-white/[0.04] flex items-center justify-between px-4 overflow-hidden flex-shrink-0">
+                      <div className="absolute top-0 bottom-0 left-0 bg-[#0099FF]/10 w-full animate-pulse" />
+                      <div className="absolute top-0 bottom-0 left-0 w-1 bg-gradient-to-b from-transparent via-[#0099FF] to-transparent h-full animate-[scannerSweep_2s_ease-in-out_infinite]" />
+                      
+                      <div className="flex items-center gap-3 relative z-10">
+                        <div className="w-7 h-7 rounded-full border border-[#06C6B3]/40 flex items-center justify-center animate-[spin_4s_linear_infinite] bg-black/40">
+                          <span className="text-[10px]">⚙️</span>
+                        </div>
+                        <div className="space-y-0.5">
+                          <div className="text-[9px] font-mono text-gray-400 uppercase tracking-wider">
+                            Active Stream
+                          </div>
+                          <div className="text-[7px] font-mono text-emerald-400 uppercase tracking-widest animate-pulse">
+                            Processing Packets...
+                          </div>
+                        </div>
                       </div>
-                    ))}
-                    {estChatLoading && (
-                      <div className="flex items-center gap-2 text-[10px] text-[#06C6B3] animate-pulse">
-                        <span>⚡</span> Estimating task dimensions...
+                      <div className="text-right font-mono text-[9px] text-[#8A2BE2] relative z-10">
+                        LATENCY: 42ms
                       </div>
-                    )}
-                  </div>
+                    </div>
 
-                  {/* Actions / Suggestions */}
-                  {suggestedEstimate !== null && (
-                    <div className="pt-2 flex-shrink-0">
+                    <div className="flex-1 overflow-y-auto max-h-[160px] pr-1 space-y-2 custom-scrollbar text-[9px] font-mono select-none">
+                      {[
+                        "Initializing Chronos Core",
+                        "Loading user profile",
+                        "Analyzing productivity patterns",
+                        "Importing calendar context",
+                        "Building behavioral model",
+                        "Running future trajectory simulation",
+                        "Calculating mission complexity",
+                        "Estimating completion probability",
+                        "Generating intervention strategy",
+                        "Finalizing mission briefing"
+                      ].map((stepText, idx) => {
+                        const currentStepIdx = Math.min(9, Math.floor(loaderProgress / 10));
+                        const isCompleted = loaderProgress === 100 || idx < currentStepIdx;
+                        const isActive = loaderProgress < 100 && idx === currentStepIdx;
+                        
+                        if (idx > currentStepIdx && loaderProgress < 100) return null;
+                        
+                        return (
+                          <div key={idx} className={`flex items-center justify-between p-2 rounded-xl border transition-all duration-300 ${
+                            isActive ? 'bg-[#0099FF]/10 border-[#0099FF]/20 text-white' : 'bg-white/5 border-white/[0.02] text-gray-500'
+                          }`}>
+                            <div className="flex items-center gap-2">
+                              {isCompleted ? (
+                                <span className="text-emerald-400 font-bold">✓</span>
+                              ) : isActive ? (
+                                <span className="text-[#0099FF] animate-spin inline-block">⚡</span>
+                              ) : (
+                                <span className="text-gray-700">○</span>
+                              )}
+                              <span className={isCompleted ? 'text-gray-400 line-through' : ''}>
+                                {stepText}
+                              </span>
+                            </div>
+                            {isActive && (
+                              <span className="text-[8px] text-[#0099FF] animate-pulse">
+                                CALIBRATING
+                              </span>
+                            )}
+                          </div>
+                        );
+                      })}
+                    </div>
+
+                    <div className="grid grid-cols-2 gap-2 pt-2 border-t border-white/5 font-mono text-[9px] flex-shrink-0">
+                      <div className="bg-white/5 p-2 rounded-xl border border-white/[0.04]">
+                        <div className="text-gray-500 uppercase text-[7px] tracking-wider">CONFIDENCE</div>
+                        <div className="text-[#06C6B3] font-bold text-xs mt-0.5 transition-all">
+                          {Math.min(89, Math.round(12 + (loaderProgress / 100) * 77))}%
+                        </div>
+                      </div>
+                      <div className="bg-white/5 p-2 rounded-xl border border-white/[0.04]">
+                        <div className="text-gray-500 uppercase text-[7px] tracking-wider">MISSION RISK</div>
+                        <div className="text-amber-400 font-bold text-xs mt-0.5 transition-all">
+                          {loaderProgress < 40 ? "UNKNOWN" : "MEDIUM"}
+                        </div>
+                      </div>
+                      <div className="bg-white/5 p-2 rounded-xl border border-white/[0.04]">
+                        <div className="text-gray-500 uppercase text-[7px] tracking-wider">EST. WORKLOAD</div>
+                        <div className="text-purple-400 font-bold text-xs mt-0.5 transition-all">
+                          {loaderProgress < 60 ? "CALCULATING" : "9 HOURS"}
+                        </div>
+                      </div>
+                      <div className="bg-white/5 p-2 rounded-xl border border-white/[0.04]">
+                        <div className="text-gray-500 uppercase text-[7px] tracking-wider">COMPLEXITY</div>
+                        <div className="text-red-400 font-bold text-xs mt-0.5 transition-all">
+                          {loaderProgress < 80 ? "ANALYZING" : "HIGH"}
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                ) : (
+                  <div className="flex flex-col h-full space-y-4">
+                    <div className="flex justify-between items-start pb-2 border-b border-gray-900 flex-shrink-0">
+                      <div>
+                        <h2 className="text-sm font-bold uppercase tracking-wider text-[#06C6B3]">
+                          AI Summarizer Core
+                        </h2>
+                        <p className="text-[8px] text-gray-500 uppercase tracking-widest mt-0.5">
+                          Calibrating temporal effort requirements
+                        </p>
+                      </div>
                       <button
                         type="button"
-                        onClick={() => {
-                          setNewHours(suggestedEstimate);
-                          setHasCompletedAiEstimation(true);
-                          toast.success(`Applied estimate of ${suggestedEstimate} hours.`);
-                        }}
-                        className="w-full py-2.5 bg-gradient-to-r from-[#06C6B3] to-[#8A2BE2] text-white rounded-xl text-[10px] font-bold uppercase tracking-wider hover:opacity-90 cursor-pointer text-center transition-all shadow-[0_0_12px_rgba(6,198,179,0.2)]"
+                        onClick={() => setShowEstimationAssistant(false)}
+                        className="text-gray-400 hover:text-gray-250 text-xs focus:outline-none font-bold"
                       >
-                        ✓ Apply Suggested Estimate of {suggestedEstimate} Hours
+                        ✕
                       </button>
                     </div>
-                  )}
 
-                  {/* Chat Input */}
-                  <form
-                    onSubmit={(e) => {
-                      e.preventDefault();
-                      handleSendEstChatMessage(e);
-                    }}
-                    className="flex gap-2 pt-3 border-t border-white/5 flex-shrink-0 animate-in fade-in duration-200"
-                  >
-                    <input
-                      type="text"
-                      placeholder="Discuss scope, tech stack, or complexity..."
-                      value={estChatInput}
-                      onChange={e => setEstChatInput(e.target.value)}
-                      disabled={estChatLoading}
-                      className="flex-1 rounded-xl px-4 py-2.5 text-xs bg-white/5 border border-white/10 focus:outline-none focus:ring-1 focus:ring-[#8A2BE2] text-gray-200 font-mono transition-all placeholder-gray-600 disabled:opacity-50"
-                    />
-                    <button
-                      type="submit"
-                      disabled={estChatLoading || !estChatInput.trim()}
-                      className="px-4 py-2.5 rounded-xl bg-[#8A2BE2] hover:opacity-90 disabled:opacity-30 disabled:cursor-not-allowed text-white text-[10px] font-bold uppercase tracking-wider transition-all cursor-pointer flex items-center justify-center shadow-[0_0_15px_rgba(138,43,226,0.25)]"
+                    {/* Chat Messages */}
+                    <div className="flex-1 overflow-y-auto space-y-3 pr-1 min-h-[200px] max-h-[300px] custom-scrollbar text-xs">
+                      {estChatHistory.map((msg, idx) => (
+                        <div key={idx} className={`group relative p-3 rounded-2xl border transition-all duration-300 ${
+                          msg.role === 'user'
+                            ? 'bg-[#8A2BE2]/10 border-[#8A2BE2]/20 text-purple-200 ml-12 text-right select-text cursor-text'
+                            : 'bg-white/5 border-white/[0.04] text-gray-300 mr-12 text-left select-none'
+                        }`}>
+                          <span className={`block text-[8px] uppercase tracking-wider mb-1 ${
+                            msg.role === 'user' ? 'text-purple-400' : 'text-[#06C6B3]'
+                          }`}>
+                            {msg.role === 'user' ? username : 'Estimation Core'}
+                          </span>
+                          <div className="space-y-1 select-text">{renderFormattedText(msg.content)}</div>
+                          {msg.role === 'user' && (
+                            <button
+                              type="button"
+                              onClick={() => setEstChatInput(msg.content)}
+                              title="Copy message back to input box to edit or resend"
+                              className="absolute left-2 top-1.5 opacity-0 group-hover:opacity-100 transition-opacity bg-black/80 border border-white/15 hover:bg-[#8A2BE2]/30 text-[7px] font-mono text-purple-300 px-1.5 py-0.5 rounded cursor-pointer uppercase tracking-widest"
+                            >
+                              🔄 Resend
+                            </button>
+                          )}
+                        </div>
+                      ))}
+                    </div>
+
+                    {/* Actions / Suggestions */}
+                    {suggestedEstimate !== null && (
+                      <div className="pt-2 flex-shrink-0">
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setNewHours(suggestedEstimate);
+                            setHasCompletedAiEstimation(true);
+                            toast.success(`Applied estimate of ${suggestedEstimate} hours.`);
+                          }}
+                          className="w-full py-2.5 bg-gradient-to-r from-[#06C6B3] to-[#8A2BE2] text-white rounded-xl text-[10px] font-bold uppercase tracking-wider hover:opacity-90 cursor-pointer text-center transition-all shadow-[0_0_12px_rgba(6,198,179,0.2)]"
+                        >
+                          ✓ Apply Suggested Estimate of {suggestedEstimate} Hours
+                        </button>
+                      </div>
+                    )}
+
+                    {/* Chat Input */}
+                    <form
+                      onSubmit={(e) => {
+                        e.preventDefault();
+                        handleSendEstChatMessage(e);
+                      }}
+                      className="flex gap-2 pt-3 border-t border-white/5 flex-shrink-0 animate-in fade-in duration-200"
                     >
-                      Send
-                    </button>
-                  </form>
-                </div>
+                      <input
+                        type="text"
+                        placeholder="Discuss scope, tech stack, or complexity..."
+                        value={estChatInput}
+                        onChange={e => setEstChatInput(e.target.value)}
+                        disabled={estChatLoading}
+                        className="flex-1 rounded-xl px-4 py-2.5 text-xs bg-white/5 border border-white/10 focus:outline-none focus:ring-1 focus:ring-[#8A2BE2] text-gray-200 font-mono transition-all placeholder-gray-600 disabled:opacity-50"
+                      />
+                      <button
+                        type="submit"
+                        disabled={estChatLoading || !estChatInput.trim()}
+                        className="px-4 py-2.5 rounded-xl bg-[#8A2BE2] hover:opacity-90 disabled:opacity-30 disabled:cursor-not-allowed text-white text-[10px] font-bold uppercase tracking-wider transition-all cursor-pointer flex items-center justify-center shadow-[0_0_15px_rgba(138,43,226,0.25)]"
+                      >
+                        Send
+                      </button>
+                    </form>
+                  </div>
+                )}
               </div>
             )}
 

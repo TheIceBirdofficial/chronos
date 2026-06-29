@@ -799,7 +799,12 @@ export default function Home() {
 
   useEffect(() => {
     setIsTransitioning(false);
+    window.scrollTo({ top: 0, behavior: 'instant' });
   }, []);
+
+  useEffect(() => {
+    window.scrollTo({ top: 0, behavior: 'instant' });
+  }, [step]);
 
   // Escape key event listener to exit warp logo mode
   useEffect(() => {
@@ -1356,6 +1361,32 @@ export default function Home() {
     }
   };
 
+  const handleSyncGoogleCalendarDirect = async (email: string) => {
+    const toastId = toast.loading(`Syncing Google Calendar events for ${email}...`);
+    try {
+      const res = await fetch(`${API_BASE}/api/calendar/sync`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email, frontend_origin: window.location.origin })
+      });
+      if (res.ok) {
+        const data = await res.json();
+        toast.dismiss(toastId);
+        if (data.count > 0) {
+          toast.success(`Synced Google Calendar: Imported ${data.count} Locked Exams.`);
+        } else {
+          toast.info("Google Calendar is up to date.");
+        }
+      } else {
+        toast.dismiss(toastId);
+        toast.error("Google Calendar sync failed.");
+      }
+    } catch (err) {
+      toast.dismiss(toastId);
+      toast.error("Google Calendar sync failed.");
+    }
+  };
+
   const handleSyncGoogleCalendar = async () => {
     const email = prompt("Enter the Google Account Email associated with your Google Calendar:");
     if (!email) return; // User cancelled
@@ -1369,15 +1400,31 @@ export default function Home() {
       const res = await fetch(`${API_BASE}/api/calendar/sync`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ email })
+        body: JSON.stringify({ email, frontend_origin: window.location.origin })
       });
       if (res.ok) {
         const data = await res.json();
-        toast.dismiss(toastId);
-        if (data.count > 0) {
-          toast.success(`Synced Google Calendar: Imported ${data.count} Locked Exams.`);
+        if (data.status === 'auth_required') {
+          toast.dismiss(toastId);
+          // Open authorization window popup
+          const popup = window.open(data.url, 'ChronosGoogleAuth', 'width=600,height=700');
+          
+          // Setup message listener
+          const handleAuthMessage = async (e: MessageEvent) => {
+            if (e.data && e.data.type === 'CHRONOS_GCAL_AUTH_SUCCESS') {
+              window.removeEventListener('message', handleAuthMessage);
+              toast.success("Google Calendar authenticated! Fetching events...");
+              await handleSyncGoogleCalendarDirect(email);
+            }
+          };
+          window.addEventListener('message', handleAuthMessage);
         } else {
-          toast.info("Google Calendar is up to date.");
+          toast.dismiss(toastId);
+          if (data.count > 0) {
+            toast.success(`Synced Google Calendar: Imported ${data.count} Locked Exams.`);
+          } else {
+            toast.info("Google Calendar is up to date.");
+          }
         }
       } else {
         toast.dismiss(toastId);

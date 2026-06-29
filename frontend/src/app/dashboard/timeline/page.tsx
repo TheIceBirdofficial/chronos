@@ -90,30 +90,54 @@ function TimelinePageContent() {
       return;
     }
 
+    let retryCount = 0;
+    let isActive = true;
+
     const fetchAndExpand = async () => {
-      setLoading(true);
+      if (!isActive) return;
       try {
         const res = await fetch(`${API_BASE}/api/tasks`);
         if (!res.ok) throw new Error('API offline');
         const tasks: Task[] = await res.json();
-        const found = tasks.find(t => t.id === taskId);
+        const found = tasks.find(t => String(t.id) === String(taskId));
+        
         if (!found) {
-          setLoading(false);
+          if (retryCount < 6) {
+            retryCount++;
+            setTimeout(fetchAndExpand, 1000);
+          } else {
+            setLoading(false);
+            toast.error("Task not found in timeline database.");
+            router.push('/dashboard');
+          }
           return;
         }
+        
         setTask(found);
-
-        // Expand timeline milestones into branches with checkpoints
-        const expanded = await expandMilestonesWithAI(found);
-        setMilestones(expanded);
+        
+        const rawTimeline = found.timeline || [];
+        const hasCheckpoints = rawTimeline.length > 0 && rawTimeline.every((m: any) => m.checkpoints && m.checkpoints.length > 0);
+        
+        if (hasCheckpoints) {
+          const expanded = await expandMilestonesWithAI(found);
+          setMilestones(expanded);
+          setLoading(false);
+        } else {
+          // Poll again in 2s while background charting runs
+          setTimeout(fetchAndExpand, 2000);
+        }
       } catch (err) {
         console.error('Timeline fetch error:', err);
-      } finally {
-        setLoading(false);
+        setTimeout(fetchAndExpand, 3000);
       }
     };
 
+    setLoading(true);
     fetchAndExpand();
+
+    return () => {
+      isActive = false;
+    };
   }, [taskId, aiConfig]);
 
   const handlePersonalizationChatSubmit = async (e: React.FormEvent) => {
@@ -238,14 +262,20 @@ Reply in 1-2 sentences concluding that their timeline calibration is complete an
     const rawTimeline = t.timeline || [];
     if (rawTimeline.length === 0) return [];
 
-    // Try to use AI to expand each milestone into checkpoints
-    const expanded: TimelineMilestone[] = [];
-
-    for (let i = 0; i < rawTimeline.length; i++) {
-      const mile = rawTimeline[i];
+    const expandedPromises = (rawTimeline as any[]).map(async (mile: any, i) => {
       let checkpoints: Checkpoint[] = [];
-
-      if (cfg && cfg.apiKey) {
+      
+      // Re-use checkpoints if already generated passively on the backend!
+      if (mile.checkpoints && mile.checkpoints.length > 0) {
+        checkpoints = mile.checkpoints.map((cp: any, idx: number) => ({
+          id: cp.id || `${mile.id}-cp${idx + 1}`,
+          title: cp.title || `Step ${idx + 1}`,
+          detail: cp.detail || '',
+          status: cp.completed ? 'completed' as const : 'pending' as const,
+          scheduledTime: mile.scheduledTime,
+          estimatedMinutes: cp.estimatedMinutes || 30
+        }));
+      } else if (cfg && cfg.apiKey) {
         try {
           const prompt = `You are Chronos, a tactical AI deadline defense system.
 Task: "${t.title}" (estimated ${t.estimatedHours}h total, importance: ${t.importance})
@@ -310,17 +340,17 @@ No markdown, no explanation.`;
         ];
       }
 
-      expanded.push({
+      return {
         id: mile.id,
         title: mile.title,
         status: mile.status as any,
         scheduledTime: mile.scheduledTime,
         checkpoints,
         branchX: BRANCH_OFFSETS[i % BRANCH_OFFSETS.length]
-      });
-    }
+      };
+    });
 
-    return expanded;
+    return Promise.all(expandedPromises);
   };
 
   const getRiskColor = (score: number | undefined) => {
@@ -344,13 +374,70 @@ No markdown, no explanation.`;
 
   if (loading) {
     return (
-      <div className="min-h-screen bg-[#0B0C10] flex items-center justify-center">
+      <div className="min-h-screen bg-[#0B0C10] flex flex-col items-center justify-center p-6 relative overflow-hidden">
+        <style>{`
+          @keyframes scannerSweep {
+            0% { left: -100%; }
+            100% { left: 150%; }
+          }
+        `}</style>
         <ParticleBackground theme="dashboard" state="thinking" />
-        <div className="text-center space-y-4 z-10 relative">
-          <div className="w-12 h-12 border-2 border-t-transparent border-[#8A2BE2] rounded-full animate-spin mx-auto" />
-          <p className="text-xs text-gray-400 font-mono uppercase tracking-widest animate-pulse">
-            Chronos is charting the temporal branches...
-          </p>
+        
+        {/* Futuristic HUD Container */}
+        <div className="w-full max-w-md bg-black/60 border border-white/[0.08] rounded-3xl p-8 shadow-[0_8px_32px_rgba(0,153,255,0.25)] backdrop-blur-xl text-center space-y-6 z-10 relative animate-in zoom-in-95 duration-500">
+          
+          {/* Rotating Glowing Glyphs */}
+          <div className="relative w-20 h-20 mx-auto flex items-center justify-center">
+            <div className="absolute inset-0 rounded-full border border-[#0099FF]/20 animate-pulse" />
+            <div className="absolute inset-2 rounded-full border-t-2 border-[#0099FF] animate-[spin_3s_linear_infinite]" />
+            <div className="absolute inset-4 rounded-full border-b border-[#8A2BE2] animate-[spin_2s_linear_infinite_reverse]" />
+            <span className="text-2xl animate-pulse">🌌</span>
+          </div>
+
+          <div className="space-y-2">
+            <h2 className="text-sm font-bold uppercase tracking-[0.2em] text-[#0099FF] flex items-center justify-center gap-1.5 animate-pulse">
+              <span className="w-1.5 h-1.5 rounded-full bg-[#0099FF] animate-ping" />
+              Adaptive Roadmap Charting
+            </h2>
+            <p className="text-[9px] text-gray-500 uppercase tracking-widest font-mono">
+              Calibrating timeline partition matrices
+            </p>
+          </div>
+
+          {/* Progress Loading Bar */}
+          <div className="space-y-3">
+            <div className="w-full h-1.5 bg-gray-950 rounded-full overflow-hidden relative border border-white/5">
+              <div className="absolute top-0 bottom-0 left-0 bg-gradient-to-r from-[#0099FF] via-[#8A2BE2] to-[#66FCF1] w-2/3 rounded-full animate-[scannerSweep_2s_ease-in-out_infinite]" />
+            </div>
+            <div className="flex justify-between font-mono text-[8px] text-gray-500">
+              <span className="animate-pulse">STATUS: CHARTING BRANCHES PASSIVELY</span>
+              <span>TELEMETRY SYNCED</span>
+            </div>
+          </div>
+
+          {/* Operation Status Log */}
+          <div className="bg-white/5 border border-white/[0.03] rounded-2xl p-4 text-left font-mono text-[8px] text-gray-400 space-y-1.5 select-none">
+            <div className="flex items-center justify-between text-emerald-400 font-semibold animate-pulse">
+              <span>● ALIGNING TELEMETRY</span>
+              <span>NODE: CORE_AI</span>
+            </div>
+            <div className="h-[1px] bg-white/5 my-2" />
+            <div className="flex items-center gap-2">
+              <span className="text-gray-600">[$]</span>
+              <span className="animate-pulse">Mapping milestone checkpoints...</span>
+            </div>
+            <div className="flex items-center gap-2 text-gray-500 text-[7px]">
+              <span>[!]</span>
+              <span>This operates in the background. You may return to control at any time.</span>
+            </div>
+          </div>
+          
+          <button
+            onClick={() => router.push('/dashboard')}
+            className="w-full py-2.5 bg-white/5 border border-white/10 hover:bg-white/10 text-gray-300 font-mono text-[9px] uppercase tracking-widest rounded-xl transition-all cursor-pointer shadow-[0_0_12px_rgba(255,255,255,0.02)]"
+          >
+            ← Return to control center (Run in background)
+          </button>
         </div>
       </div>
     );
