@@ -23,6 +23,13 @@ export default function TwinProfilePage() {
   const [refineCount, setRefineCount] = useState(0);
 
   useEffect(() => {
+    // Route Guard: Prevent skipping onboarding
+    const savedName = localStorage.getItem("chronos-username");
+    const savedTwin = localStorage.getItem("chronos-performance-twin");
+    if (!savedName || !savedTwin) {
+      router.push('/');
+      return;
+    }
     setIsTransitioning(false);
   }, []);
 
@@ -62,7 +69,7 @@ export default function TwinProfilePage() {
     setRefineHistory([]);
     setRefineCount(0);
 
-    const config = aiConfig || { provider: 'ollama', apiUrl: 'http://localhost:11434', model: 'llama3' };
+    const config = aiConfig || { provider: 'gemini', apiUrl: 'https://generativelanguage.googleapis.com/v1beta', model: 'gemini-1.5-flash' };
 
     const initialPrompt = `You are Chronos, the AI onboarding guide. The user is refining their Performance Twin Profile.
 Here is their current profile summary:
@@ -116,7 +123,7 @@ Ask exactly one question. Keep it extremely short (max 15-20 words). Do not writ
     ];
     setRefineHistory(updatedHistory);
 
-    const config = aiConfig || { provider: 'ollama', apiUrl: 'http://localhost:11434', model: 'llama3' };
+    const config = aiConfig || { provider: 'gemini', apiUrl: 'https://generativelanguage.googleapis.com/v1beta', model: 'gemini-1.5-flash' };
 
     if (refineCount >= 3) {
       // Compile final twin profile summary

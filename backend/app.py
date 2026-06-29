@@ -2565,6 +2565,36 @@ def mute_status():
         "remaining_seconds": remaining
     })
 
+@app.route('/api/phone/test', methods=['POST'])
+def test_phone_notification():
+    data = request.get_json() or {}
+    topic = data.get('ntfyTopic')
+    if not topic:
+        return jsonify({"error": "Topic name is required"}), 400
+        
+    url = f"https://ntfy.sh/{topic}"
+    headers = {
+        "Title": "Chronos Synchronization",
+        "Priority": "high",
+        "Tags": "incoming_envelope,lock"
+    }
+    try:
+        session = requests.Session()
+        session.trust_env = False
+        res = session.post(
+            url, 
+            data="Chronos Phone Link successfully verified! Real-time telemetry alerts are now active.".encode('utf-8'), 
+            headers=headers, 
+            proxies={}, 
+            timeout=10
+        )
+        if res.status_code == 200:
+            return jsonify({"status": "success", "message": "Verification notification dispatched successfully!"})
+        else:
+            return jsonify({"error": f"Failed to reach notification broker: HTTP {res.status_code}"}), 502
+    except Exception as e:
+        return jsonify({"error": f"Network error: {str(e)}"}), 500
+
 @app.route('/api/settings', methods=['GET', 'POST'])
 def handle_settings():
     settings_file = os.path.join(os.path.dirname(__file__), 'settings.json')

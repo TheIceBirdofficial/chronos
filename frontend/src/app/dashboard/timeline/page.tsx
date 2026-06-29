@@ -71,6 +71,14 @@ function TimelinePageContent() {
   const [personalizationCompleted, setPersonalizationCompleted] = useState(false);
 
   useEffect(() => {
+    // Route Guard: Prevent skipping onboarding
+    const savedName = localStorage.getItem("chronos-username");
+    const savedTwin = localStorage.getItem("chronos-performance-twin");
+    if (!savedName || !savedTwin) {
+      router.push('/');
+      return;
+    }
+
     setIsTransitioning(false);
     const savedConfig = localStorage.getItem('chronos-ai-config');
     if (savedConfig) setAiConfig(JSON.parse(savedConfig));
@@ -141,10 +149,10 @@ Reply in 1-2 sentences concluding that their timeline calibration is complete an
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          provider: aiConfig?.provider || 'ollama',
+          provider: aiConfig?.provider || 'gemini',
           apiUrl: aiConfig?.apiUrl || '',
           apiKey: aiConfig?.apiKey || '',
-          model: aiConfig?.model || 'gemma2:2b',
+          model: aiConfig?.model || 'gemini-1.5-flash',
           messages: [{ role: 'user', content: nextPrompt }]
         })
       });

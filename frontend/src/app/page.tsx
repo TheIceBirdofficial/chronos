@@ -4,6 +4,8 @@ import { useState, useEffect, useRef } from 'react';
 import { useRouter } from 'next/navigation';
 import ChronosCanvas from '@/components/ChronosCanvas';
 import { API_BASE } from "@/config";
+import { toast } from "sonner";
+import { Toaster } from "@/components/ui/sonner";
 
 // Analog Clock SVG component for the first "O"
 function ClockO({ size = '0.9em', color = '#06C6B3', glowColor = 'rgba(6, 198, 179, 0.42)', isWarpActive = false }: { size?: number | string; color?: string; glowColor?: string; isWarpActive?: boolean }) {
@@ -835,6 +837,15 @@ export default function Home() {
     maxQuestions: 7, // default 7
   });
 
+  const generateRandomNtfyTopic = () => {
+    const chars = 'abcdefghijklmnopqrstuvwxyz0123456789';
+    let rand = '';
+    for (let i = 0; i < 6; i++) {
+      rand += chars.charAt(Math.floor(Math.random() * chars.length));
+    }
+    return `chronos_alerts_${rand}`;
+  };
+
   const [username, setUsername] = useState('user');
   const [hasMemory, setHasMemory] = useState(false);
   const [openHomeSettings, setOpenHomeSettings] = useState(false);
@@ -844,7 +855,15 @@ export default function Home() {
   const [sleepStart, setSleepStart] = useState<number>(23);
   const [sleepEnd, setSleepEnd] = useState<number>(7);
   const [scanError, setScanError] = useState<string | null>(null);
-  const [ntfyTopic, setNtfyTopic] = useState<string>("chronos-alerts-user");
+  const [ntfyTopic, setNtfyTopic] = useState<string>(() => {
+    // Generate a random topic by default to be secure
+    const chars = 'abcdefghijklmnopqrstuvwxyz0123456789';
+    let rand = '';
+    for (let i = 0; i < 6; i++) {
+      rand += chars.charAt(Math.floor(Math.random() * chars.length));
+    }
+    return `chronos_alerts_${rand}`;
+  });
   const devOverrideStateRef = useRef(devOverrideState);
   
   useEffect(() => {
@@ -901,10 +920,35 @@ export default function Home() {
         return res.json();
       })
       .then(data => {
-        if (data.username) setUsername(data.username);
+        if (data.username) {
+          setUsername(data.username);
+          localStorage.setItem('chronos-username', data.username);
+        }
+        if (data.twinProfile) {
+          localStorage.setItem('chronos-performance-twin', data.twinProfile);
+          setHasMemory(true);
+        }
         if (data.sleepStart !== undefined) setSleepStart(data.sleepStart);
         if (data.sleepEnd !== undefined) setSleepEnd(data.sleepEnd);
-        if (data.ntfyTopic !== undefined) setNtfyTopic(data.ntfyTopic);
+        if (data.ntfyTopic !== undefined && data.ntfyTopic.trim() !== '' && !data.ntfyTopic.startsWith('chronos-alerts-')) {
+          setNtfyTopic(data.ntfyTopic);
+          localStorage.setItem('chronos-ntfy-topic', data.ntfyTopic);
+        } else {
+          const rand = generateRandomNtfyTopic();
+          setNtfyTopic(rand);
+          localStorage.setItem('chronos-ntfy-topic', rand);
+        }
+        if (data.aiProvider) {
+          const config = {
+            provider: data.aiProvider,
+            apiUrl: data.aiApiUrl || '',
+            apiKey: data.aiApiKey || '',
+            model: data.aiModel || 'gemini-1.5-flash',
+            maxQuestions: 7
+          };
+          setAiConfig(config);
+          localStorage.setItem('chronos-ai-config', JSON.stringify(config));
+        }
       })
       .catch(err => {
         console.warn("Failed to fetch settings from backend", err);
@@ -1181,8 +1225,14 @@ export default function Home() {
 
   const handleSaveSettings = async (e: React.FormEvent) => {
     e.preventDefault();
+    let finalNtfyTopic = ntfyTopic;
+    if (finalNtfyTopic.startsWith('chronos-alerts-') || !finalNtfyTopic.trim()) {
+      finalNtfyTopic = generateRandomNtfyTopic();
+      setNtfyTopic(finalNtfyTopic);
+    }
     localStorage.setItem('chronos-ai-config', JSON.stringify(aiConfig));
     localStorage.setItem('chronos-username', username);
+    localStorage.setItem('chronos-ntfy-topic', finalNtfyTopic);
     
     try {
       await fetch(`${API_BASE}/api/settings`, {
@@ -1192,7 +1242,7 @@ export default function Home() {
           username,
           sleepStart: Number(sleepStart),
           sleepEnd: Number(sleepEnd),
-          ntfyTopic,
+          ntfyTopic: finalNtfyTopic,
           twinProfile: localStorage.getItem('chronos-performance-twin') || ""
         })
       });
@@ -1226,7 +1276,7 @@ export default function Home() {
       if (isTyping || chatLoading) return;
       
       const PRESET_ANSWERS = [
-        `My name is ${username}. I am a software engineer working remotely. My typical routine starts at 8 AM, check emails, code until lunch at 12:30 PM, then attend standups at 2 PM, and continue coding or reviewing pull requests until 6 PM. I usually study or work on side projects in the evening around 8 PM.`,
+        "My name is Akash. I am the developer of Chronos and a software engineer. My daily routine is highly focused on writing clean code, building aesthetic interfaces, and debugging system components.",
         "My peak focus hours are in the morning between 9:30 AM and 11:30 AM, and then later in the evening between 8:30 PM and 10:30 PM. During these times, I feel most alert and can solve complex engineering problems without feeling tired.",
         "My main procrastination triggers are vague or undefined tasks without clear milestones, which leads to analysis paralysis. When distracted, I check social media on my phone, browse technical blogs, or watch YouTube videos.",
         "My primary motivation style is a mix of visual completion (crossing tasks off a list) and AI coaching warnings. I work well with deadline pressure but prefer structured micro-sprints.",
@@ -1255,10 +1305,13 @@ export default function Home() {
     }
   };
   const handleInstantBypass = async () => {
-    const finalUsername = username === 'user' ? 'Akash' : username;
+    const finalUsername = 'Akash';
     const finalSleepStart = 23;
     const finalSleepEnd = 7;
-    const finalNtfyTopic = ntfyTopic === 'chronos-alerts-user' ? 'chronos-alerts-akash' : ntfyTopic;
+    let finalNtfyTopic = ntfyTopic;
+    if (finalNtfyTopic.startsWith('chronos-alerts-') || !finalNtfyTopic.trim()) {
+      finalNtfyTopic = generateRandomNtfyTopic();
+    }
 
     setUsername(finalUsername);
     setSleepStart(finalSleepStart);
@@ -1269,11 +1322,11 @@ export default function Home() {
     localStorage.setItem('chronos-username', finalUsername);
     localStorage.setItem('chronos-ntfy-topic', finalNtfyTopic);
 
-    const summary = "Performance Twin Profile:\n- User: Akash\n- Role: Software Engineer\n- Style: Aesthetic perfectionist who values visual completion and high-fidelity interface feedback.\n- Productivity Peaks: Focus peaks during late evening (8:30 PM - 10:30 PM) and mid-morning (9:30 AM - 11:30 AM).\n- Procrastination Triggers: Prone to analysis paralysis and postponement on vague, administrative, or poorly defined tasks.\n- Procrastination Rating: 8.0/10";
+    const summary = "Performance Twin Profile:\n- User: Akash\n- Role: Software Engineer & Developer of Chronos\n- Style: Aesthetic perfectionist who values visual completion and high-fidelity interface feedback.\n- Productivity Peaks: Focus peaks during late evening (8:30 PM - 10:30 PM) and mid-morning (9:30 AM - 11:30 AM).\n- Procrastination Triggers: Prone to analysis paralysis and postponement on vague, administrative, or poorly defined tasks.\n- Procrastination Rating: 6.0/10";
 
     setProfileSummary(summary);
     localStorage.setItem('chronos-performance-twin', summary);
-    localStorage.setItem('chronos-procrastination-rating', '8.0');
+    localStorage.setItem('chronos-procrastination-rating', '6.0');
     localStorage.setItem('chronos-attention-cycle', "Focus cycles peak late evening");
     localStorage.setItem('chronos-stress-response', "Postpones tasks under high workload pressure");
     
@@ -1292,7 +1345,7 @@ export default function Home() {
           sleepEnd: finalSleepEnd,
           ntfyTopic: finalNtfyTopic,
           twinProfile: summary,
-          procrastinationRating: 8.0,
+          procrastinationRating: 6.0,
           attentionCycle: "Focus cycles peak late evening",
           stressResponse: "Postpones tasks under high workload pressure"
         })
@@ -1302,12 +1355,43 @@ export default function Home() {
     }
   };
 
+  const handleSyncGoogleCalendar = async () => {
+    const toastId = toast.loading("Syncing Google Calendar events...");
+    try {
+      const res = await fetch(`${API_BASE}/api/calendar/sync`, {
+        method: 'POST',
+      });
+      if (res.ok) {
+        const data = await res.json();
+        toast.dismiss(toastId);
+        if (data.count > 0) {
+          toast.success(`Synced Google Calendar: Imported ${data.count} Locked Exams.`);
+        } else {
+          toast.info("Google Calendar is up to date.");
+        }
+      } else {
+        toast.dismiss(toastId);
+        toast.error("Google Calendar sync failed.");
+      }
+    } catch (err) {
+      toast.dismiss(toastId);
+      toast.error("Google Calendar sync failed.");
+    }
+  };
+
   // Dynamic Model Fetching & Connectivity Validation Hook
   useEffect(() => {
     if (step !== 'settings' && !openHomeSettings) return;
 
     let active = true;
     const fetchModelsAndValidate = async () => {
+      // Avoid querying with incomplete/empty API keys during typing
+      if (aiConfig.provider !== 'custom' && (!aiConfig.apiKey || aiConfig.apiKey.trim().length <= 5)) {
+        setConnectionStatus('offline');
+        setConnectionError('API Key is incomplete.');
+        return;
+      }
+
       setLoadingModels(true);
       setConnectionStatus('checking');
       setConnectionError('');
@@ -1326,11 +1410,11 @@ export default function Home() {
           if (data.offline) {
             setConnectionStatus('offline');
             setConnectionError(
-              aiConfig.provider === 'ollama'
-                ? "OLLAMA OFFLINE: Chronos cannot communicate with your local AI core. Please launch the Ollama application on your computer, verify it is running on http://localhost:11434, and ensure you have pulled a model (e.g. 'ollama pull llama3'). Once running, this status will update to ONLINE."
-                : aiConfig.provider === 'gemini'
-                  ? "GEMINI OFFLINE: Unreachable or API Key is invalid. Please verify your Google Gemini API Key."
-                  : "NVIDIA NIM OFFLINE: Unreachable or API Key is invalid. Please verify your NVIDIA API Key (nvapi-...) has active credits and that your internet connection is active."
+              aiConfig.provider === 'gemini'
+                ? "GEMINI OFFLINE: Unreachable or API Key is invalid. Please verify your Google Gemini API Key."
+                : aiConfig.provider === 'nvidia'
+                  ? "NVIDIA NIM OFFLINE: Unreachable or API Key is invalid. Please verify your NVIDIA API Key (nvapi-...) has active credits and that your internet connection is active."
+                  : "CUSTOM CORE OFFLINE: Unreachable or verification failed. Please check your Base URL and settings."
             );
           } else {
             setConnectionStatus('online');
@@ -1346,11 +1430,11 @@ export default function Home() {
         if (active) {
           setConnectionStatus('offline');
           setConnectionError(
-            aiConfig.provider === 'ollama'
-              ? "CONNECTION ERROR: Could not connect to the local server or Ollama port. Verify that the Ollama app is running locally."
-              : aiConfig.provider === 'gemini'
-                ? "CONNECTION ERROR: Could not reach the Google Gemini API. Verify your API Key and internet connection."
-                : "CONNECTION ERROR: Could not reach the NVIDIA NIM API. Verify your API Key and internet connection."
+            aiConfig.provider === 'gemini'
+              ? "CONNECTION ERROR: Could not reach the Google Gemini API. Verify your API Key and internet connection."
+              : aiConfig.provider === 'nvidia'
+                ? "CONNECTION ERROR: Could not reach the NVIDIA NIM API. Verify your API Key and internet connection."
+                : "CONNECTION ERROR: Could not reach your Custom API endpoint. Verify your Base URL and internet connection."
           );
         }
       } finally {
@@ -1359,7 +1443,7 @@ export default function Home() {
     };
 
     // Debounce the connection checks slightly to handle fast typing overrides
-    const delayDebounce = setTimeout(fetchModelsAndValidate, 500);
+    const delayDebounce = setTimeout(fetchModelsAndValidate, 1500);
 
     return () => {
       active = false;
@@ -2082,15 +2166,14 @@ Start the final response with "IDENTITY SCAN COMPLETE". (The final profile summa
                     <label className="block text-[10px] font-bold uppercase tracking-widest text-gray-400">
                       AI Supplier Engine
                     </label>
-                    <div className="grid grid-cols-4 gap-2">
-                      {['gemini', 'ollama', 'nvidia', 'custom'].map(p => (
+                    <div className="grid grid-cols-3 gap-2">
+                      {['gemini', 'nvidia', 'custom'].map(p => (
                         <button
                           key={p}
                           type="button"
                           onClick={() => setAiConfig(prev => {
                             const defaults: Record<string, any> = {
                               gemini: { provider: 'gemini', apiUrl: 'https://generativelanguage.googleapis.com/v1beta', model: 'gemini-1.5-flash' },
-                              ollama: { provider: 'ollama', apiUrl: 'http://localhost:11434', model: 'llama3' },
                               nvidia: { provider: 'nvidia', apiUrl: 'https://integrate.api.nvidia.com/v1', model: 'meta/llama-3-70b-instruct' },
                               custom: { provider: 'custom', apiUrl: 'http://localhost:8000/v1', model: 'gpt-4o' }
                             };
@@ -2163,12 +2246,6 @@ Start the final response with "IDENTITY SCAN COMPLETE". (The final profile summa
                     <span className="text-[#06C6B3] font-bold uppercase block tracking-wider border-b border-white/5 pb-1">💡 Provider Model Recommendations:</span>
                     
                     <div className="space-y-2 max-h-[140px] overflow-y-auto pr-1 scrollbar-thin">
-                      {/* Ollama */}
-                      <div className="p-2 bg-black/40 border border-white/5 rounded-lg space-y-1">
-                        <div className="text-[#06C6B3] font-bold uppercase text-[9px]">🦙 Ollama (Local)</div>
-                        <div className="text-[8px] text-gray-400">• Min Spec: <code className="text-[#c084fc]">qwen2.5:1.5b</code> (low memory usage)</div>
-                        <div className="text-[8px] text-gray-400">• Nominal: <code className="text-[#66FCF1]">qwen2.5:3b</code> or <code className="text-[#66FCF1]">gemma2:2b</code> (recommended)</div>
-                      </div>
 
                       {/* Gemini */}
                       <div className="p-2 bg-black/40 border border-white/5 rounded-lg space-y-1">
@@ -2197,7 +2274,7 @@ Start the final response with "IDENTITY SCAN COMPLETE". (The final profile summa
                     <button
                       type="button"
                       onClick={async () => {
-                        if (aiConfig.provider !== 'ollama' && !aiConfig.apiKey.trim()) {
+                        if (aiConfig.provider !== 'custom' && !aiConfig.apiKey.trim()) {
                           alert("API Key is mandatory for this supplier.");
                           return;
                         }
@@ -2822,22 +2899,21 @@ Start the final response with "IDENTITY SCAN COMPLETE". (The final profile summa
                     </span>
                   </div>
                   
-                  {aiConfig.provider === 'ollama' ? (
-                    <div className="space-y-2 text-[11px] text-gray-400 leading-relaxed font-mono">
-                      <p className="text-gray-300 font-semibold">Instructions to bring Ollama online:</p>
-                      <ol className="list-decimal list-inside space-y-1">
-                        <li>Launch the <span className="text-white font-bold">Ollama</span> application on your computer.</li>
-                        <li>Verify it is running locally by visiting <span className="text-[#06C6B3] underline">http://localhost:11434</span> in your browser.</li>
-                        <li>Ensure you have pulled your selected model (e.g. run <code className="text-gray-200 bg-[#1F2833]/40 px-1 py-0.5 rounded">ollama pull llama3</code> in your terminal).</li>
-                      </ol>
-                    </div>
-                  ) : aiConfig.provider === 'nvidia' ? (
+                  {aiConfig.provider === 'nvidia' ? (
                     <div className="space-y-2 text-[11px] text-gray-400 leading-relaxed font-mono">
                       <p className="text-gray-300 font-semibold">Instructions to bring NVIDIA NIM online:</p>
                       <ol className="list-decimal list-inside space-y-1">
                         <li>Ensure your <span className="text-white font-bold">NVIDIA API Key</span> is correct and has active credits.</li>
                         <li>Check that your computer has an active internet connection.</li>
                         <li>Verify the Base URL Override under Advanced settings if you are using a custom gateway.</li>
+                      </ol>
+                    </div>
+                  ) : aiConfig.provider === 'gemini' ? (
+                    <div className="space-y-2 text-[11px] text-gray-400 leading-relaxed font-mono">
+                      <p className="text-gray-300 font-semibold">Instructions to bring Google Gemini online:</p>
+                      <ol className="list-decimal list-inside space-y-1">
+                        <li>Ensure your <span className="text-white font-bold">Google Gemini API Key</span> is correct.</li>
+                        <li>Check that your computer has an active internet connection.</li>
                       </ol>
                     </div>
                   ) : (
@@ -2863,15 +2939,14 @@ Start the final response with "IDENTITY SCAN COMPLETE". (The final profile summa
                   <label className="block text-xs font-semibold uppercase tracking-wider text-gray-400">
                     1. AI Core Supplier <span className="text-red-400">*</span>
                   </label>
-                  <div className="grid grid-cols-4 gap-2">
-                    {['gemini', 'ollama', 'nvidia', 'custom'].map(p => (
+                  <div className="grid grid-cols-3 gap-2">
+                    {['gemini', 'nvidia', 'custom'].map(p => (
                       <button
                         key={p}
                         type="button"
                         onClick={() => setAiConfig(prev => {
                           const defaults: Record<string, any> = {
                             gemini: { provider: 'gemini', apiUrl: 'https://generativelanguage.googleapis.com/v1beta', model: 'gemini-1.5-flash' },
-                            ollama: { provider: 'ollama', apiUrl: 'http://localhost:11434', model: 'llama3' },
                             nvidia: { provider: 'nvidia', apiUrl: 'https://integrate.api.nvidia.com/v1', model: 'meta/llama-3-70b-instruct' },
                             custom: { provider: 'custom', apiUrl: 'http://localhost:8000/v1', model: 'gpt-4o' }
                           };
@@ -2894,22 +2969,20 @@ Start the final response with "IDENTITY SCAN COMPLETE". (The final profile summa
                 </div>
 
                 {/* 2. API Key */}
-                {aiConfig.provider !== 'ollama' && (
-                  <div className="space-y-1.5">
-                    <label className="block text-xs font-semibold uppercase tracking-wider text-gray-400">
-                      2. API Key <span className="text-red-400">*</span>
-                    </label>
-                    <input
-                      type="password"
-                      required
-                      placeholder={aiConfig.provider === 'nvidia' ? "nvapi-..." : aiConfig.provider === 'gemini' ? "Google Gemini API Key..." : "API Key..."}
-                      value={aiConfig.apiKey}
-                      onChange={e => setAiConfig(prev => ({ ...prev, apiKey: e.target.value }))}
-                      className="w-full rounded-lg px-4 py-2 text-sm focus:ring-1 focus:ring-[#8A2BE2] focus:outline-none transition-colors border border-gray-700 font-mono"
-                      style={{ backgroundColor: '#1F2833', color: '#8A2BE2' }}
-                    />
-                  </div>
-                )}
+                <div className="space-y-1.5">
+                  <label className="block text-xs font-semibold uppercase tracking-wider text-gray-400">
+                    2. API Key <span className="text-red-400">*</span>
+                  </label>
+                  <input
+                    type="password"
+                    required={aiConfig.provider !== 'custom'}
+                    placeholder={aiConfig.provider === 'nvidia' ? "nvapi-..." : aiConfig.provider === 'gemini' ? "Google Gemini API Key..." : "API Key (Optional)..."}
+                    value={aiConfig.apiKey}
+                    onChange={e => setAiConfig(prev => ({ ...prev, apiKey: e.target.value }))}
+                    className="w-full rounded-lg px-4 py-2 text-sm focus:ring-1 focus:ring-[#8A2BE2] focus:outline-none transition-colors border border-gray-700 font-mono"
+                    style={{ backgroundColor: '#1F2833', color: '#8A2BE2' }}
+                  />
+                </div>
 
                 {/* 3. AI Model */}
                 <div className="space-y-1.5">
@@ -2940,11 +3013,9 @@ Start the final response with "IDENTITY SCAN COMPLETE". (The final profile summa
                       {(() => {
                         const models = availableModels.length > 0
                           ? availableModels
-                          : (aiConfig.provider === 'ollama'
-                              ? ['llama3', 'llama3.1', 'mistral', 'gemma', 'phi3']
-                              : aiConfig.provider === 'gemini'
-                                ? ['gemini-1.5-flash', 'gemini-1.5-pro', 'gemini-2.5-flash', 'gemini-2.5-pro']
-                                : ['meta/llama-3-70b-instruct', 'meta/llama-3.1-70b-instruct', 'nvidia/llama-3.1-nemotron-70b-instruct']);
+                          : (aiConfig.provider === 'gemini'
+                              ? ['gemini-1.5-flash', 'gemini-1.5-pro', 'gemini-2.5-flash', 'gemini-2.5-pro']
+                              : ['meta/llama-3-70b-instruct', 'meta/llama-3.1-70b-instruct', 'nvidia/llama-3.1-nemotron-70b-instruct']);
                         return models.map(m => (
                           <option key={m} value={m}>{m}</option>
                         ));
@@ -2962,13 +3033,6 @@ Start the final response with "IDENTITY SCAN COMPLETE". (The final profile summa
                     <span className="text-[#06C6B3] font-bold uppercase block tracking-wider border-b border-white/5 pb-1">💡 Provider Model Recommendations:</span>
                     
                     <div className="space-y-2 max-h-[140px] overflow-y-auto pr-1 scrollbar-thin">
-                      {/* Ollama */}
-                      <div className="p-2 bg-black/40 border border-white/5 rounded-lg space-y-1">
-                        <div className="text-[#06C6B3] font-bold uppercase text-[9px]">🦙 Ollama (Local)</div>
-                        <div className="text-[8px] text-gray-400">• Min Spec: <code className="text-[#c084fc]">qwen2.5:1.5b</code> (low memory usage)</div>
-                        <div className="text-[8px] text-gray-400">• Nominal: <code className="text-[#66FCF1]">qwen2.5:3b</code> or <code className="text-[#66FCF1]">gemma2:2b</code> (recommended)</div>
-                      </div>
-
                       {/* Gemini */}
                       <div className="p-2 bg-black/40 border border-white/5 rounded-lg space-y-1">
                         <div className="text-[#8A2BE2] font-bold uppercase text-[9px]">✨ Google Gemini (Cloud)</div>
@@ -3020,10 +3084,27 @@ Start the final response with "IDENTITY SCAN COMPLETE". (The final profile summa
                   </div>
                 </div>
 
-                {/* 6. Phone Link Setup */}
+                {/* 6. Google Calendar Integration */}
                 <div className="space-y-2 pt-2 border-t border-white/5">
                   <label className="block text-xs font-semibold uppercase tracking-wider text-gray-400">
-                    6. Phone Link Setup (Optional)
+                    6. Google Calendar Integration (Optional)
+                  </label>
+                  <button
+                    type="button"
+                    onClick={handleSyncGoogleCalendar}
+                    className="w-full py-3 rounded-xl border border-[#06C6B3]/40 text-[#66FCF1] hover:bg-[#06C6B3]/10 transition-all font-mono text-[10px] uppercase tracking-widest cursor-pointer font-bold shadow-[0_0_15px_rgba(6,198,179,0.1)]"
+                  >
+                    📅 Sync Google Calendar Events →
+                  </button>
+                  <p className="text-[8px] text-gray-500 font-mono italic">
+                    Locks your calendar events into Chronos to shield them from scheduling conflicts.
+                  </p>
+                </div>
+
+                {/* 7. Phone Link Setup */}
+                <div className="space-y-2 pt-2 border-t border-white/5">
+                  <label className="block text-xs font-semibold uppercase tracking-wider text-gray-400">
+                    7. Phone Link Setup (Optional)
                   </label>
                   <button
                     type="button"
@@ -3035,17 +3116,6 @@ Start the final response with "IDENTITY SCAN COMPLETE". (The final profile summa
                   <p className="text-[8px] text-gray-500 font-mono italic">
                     Configure real-time mobile push notifications via the secure Out-of-Band alert protocol.
                   </p>
-                </div>
-
-                {/* 7. Tips & Shortcuts */}
-                <div className="space-y-1.5">
-                  <label className="block text-xs font-semibold uppercase tracking-wider text-gray-400">
-                    7. Tips & Shortcuts
-                  </label>
-                  <div className="p-3 rounded-xl bg-[#06C6B3]/10 border border-[#06C6B3]/20 text-[9px] text-gray-400 font-mono leading-relaxed space-y-1">
-                    <p className="text-[#06C6B3] font-bold uppercase text-[8px] tracking-wider">🤫 Keyboard Silence Shortcut:</p>
-                    <p>Press the <code className="bg-black/30 px-1 py-0.5 rounded text-amber-400 font-bold font-mono">`</code> (backtick) key twice at any time to silence Chronos speech.</p>
-                  </div>
                 </div>
 
                 {/* 8. Advanced Connection Settings */}
@@ -3138,6 +3208,16 @@ Start the final response with "IDENTITY SCAN COMPLETE". (The final profile summa
                       </p>
                     </div>
                   </div>
+
+                  <div className="p-3.5 rounded-2xl bg-[#1F2833]/25 border border-gray-800/80 flex gap-3">
+                    <span className="text-base select-none">📅</span>
+                    <div>
+                      <h4 className="text-xs font-bold text-gray-200 uppercase tracking-wider mb-0.5">Google Calendar Integration</h4>
+                      <p className="text-[11px] text-gray-400 leading-normal">
+                        Synchronizes your schedule with Google Calendar automatically. It locks critical time blocks, detects scheduling conflicts dynamically, and reschedules fluid tasks around absolute real-world commitments.
+                      </p>
+                    </div>
+                  </div>
                 </div>
               </div>
 
@@ -3201,8 +3281,8 @@ Start the final response with "IDENTITY SCAN COMPLETE". (The final profile summa
                     <div className="space-y-1.5 pt-2 text-[10px] text-gray-400">
                       <p className="font-bold text-gray-300 uppercase tracking-widest">Diagnostic Checklist:</p>
                       <ul className="list-disc pl-4 space-y-1 font-sans">
-                        <li>Verify if Ollama is running locally: open a terminal and run <code className="bg-black/30 px-1 py-0.5 rounded text-amber-400 font-mono text-[9px]">ollama list</code>.</li>
-                        <li>Make sure your model <code className="bg-black/30 px-1 py-0.5 rounded text-amber-400 font-mono text-[9px]">{aiConfig.model}</code> is downloaded.</li>
+                        <li>Ensure that your internet connection is active and stable.</li>
+                        <li>Make sure that your target model <code className="bg-black/30 px-1 py-0.5 rounded text-amber-400 font-mono text-[9px]">{aiConfig.model}</code> is supported by your provider.</li>
                         <li>Ensure the Chronos Python backend daemon is online on port 5000.</li>
                         <li>Check your API keys or base URL override under the AI Core Settings.</li>
                       </ul>
@@ -3329,6 +3409,7 @@ Start the final response with "IDENTITY SCAN COMPLETE". (The final profile summa
         </div>
       )}
       </div>
+      <Toaster position="top-center" theme="dark" />
     </>
   );
 }

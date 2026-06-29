@@ -32,8 +32,7 @@ WINDOW_FRAMES = 16
 
 # Configurable Flask base URL via environment variable
 FLASK_SERVER = os.environ.get("CHRONOS_API_URL", "http://127.0.0.1:5000").rstrip("/")
-OLLAMA_SERVER = os.environ.get("OLLAMA_SERVER", "http://localhost:11434").rstrip("/")
-OLLAMA_MODEL = os.environ.get("OLLAMA_MODEL", "gemma2:2b")
+
 
 # Local Kokoro ONNX model path settings using user home directory dynamically
 home_dir = Path.home()
@@ -256,88 +255,15 @@ def play_indicator_sound(sound_type: str) -> None:
 
 
 def query_ai_assistant(query_text: str) -> str:
-    """Query the AI assistant. Uses remote Flask server for Gemini, or queries local Ollama directly."""
-    ai_provider = os.environ.get("CHRONOS_AI_PROVIDER", "gemini" if os.environ.get("GEMINI_API_KEY") else "ollama")
-    
-    # 1. Gemini flow via remote Flask endpoint
-    if ai_provider == "gemini":
-        try:
-            url = f"{FLASK_SERVER}/api/voice/query"
-            payload = {"query": query_text}
-            res = make_local_request('POST', url, json=payload, timeout=15)
-            if res.status_code == 200:
-                return res.json().get("content", "").strip()
-        except Exception as e:
-            print(f"[Remote Voice Query Error] {e}")
-            
-    # 2. Ollama flow (runs locally on desktop to access localhost:11434 directly)
-    else:
-        try:
-            settings = get_user_settings()
-            username = settings.get("username", "operator")
-            twin_profile = settings.get("twinProfile", "")
-            
-            # Fetch active tasks from remote Flask server to construct system prompt context
-            tasks_info = ""
-            try:
-                res = make_local_request('GET', f"{FLASK_SERVER}/api/tasks", timeout=3)
-                if res.status_code == 200:
-                    tasks = res.json()
-                    active_tasks = [t for t in tasks if not t.get('completed', False)]
-                    if active_tasks:
-                        tasks_info = " Active tasks: " + ", ".join([
-                            f"'{t['title']}' (Score: {t['survivalScore']}%, due: {t.get('due')}, est hours: {t.get('estimatedHours')}h)"
-                            for t in active_tasks
-                        ]) + "."
-            except Exception as e:
-                print(f"[Ollama Context Sync Error] {e}")
-                
-            import datetime
-            now_dt = datetime.datetime.now()
-            time_context = now_dt.strftime("%A, %B %d, %Y, %I:%M %p")
-            
-            system_prompt = (
-                f"You are Chronos, a tactical AI deadline defense system. The operator's name is {username}.\n"
-                f"The current system date and time is {time_context}.\n"
-                f"Keep your response strictly to 1 or 2 short sentences. Your tone is highly professional, focused, "
-                f"and slightly urgent (like mission control).\n"
-                f"You support task creation and simulation commands via special tags. If the user asks for one of these, you MUST append the exact tag at the end of your response:\n"
-                f"1. Task Creation: If the user wants to add/create a task, estimate its duration (default 2.0 hours) and importance (default 'medium'), compute the deadline relative to the current time, and format: [CREATE_TASK: {{\"title\": \"Task Title\", \"due\": \"YYYY-MM-DDTHH:MM:SS\", \"estimatedHours\": X.Y, \"importance\": \"low|medium|high\"}}]\n"
-                f"2. Advance/Simulate Time: [CMD: SIMULATE_TIME]\n"
-                f"3. Simulate Collapse/Emergency Mode: [CMD: SIMULATE_COLLAPSE]\n"
-                f"4. Evaluate Tasks/Pulse: [CMD: RUN_PULSE]\n"
-                f"5. Rescue Task/Trigger Recovery: [CMD: RESCUE]\n"
-            )
-            if twin_profile:
-                system_prompt += f" Consider the operator's digital twin profile: {twin_profile}."
-            if tasks_info:
-                system_prompt += f" Use this context if relevant:{tasks_info}"
-                
-            url = f"{OLLAMA_SERVER}/api/chat"
-            model_name = OLLAMA_MODEL
-            try:
-                tag_res = make_local_request('GET', f"{OLLAMA_SERVER}/api/tags", timeout=2)
-                if tag_res.status_code == 200:
-                    models = [m["name"] for m in tag_res.json().get("models", [])]
-                    if models:
-                        model_name = models[0]
-            except Exception:
-                pass
-                
-            payload = {
-                "model": model_name,
-                "messages": [
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": query_text}
-                ],
-                "stream": False,
-                "options": {"temperature": 0.5}
-            }
-            res = make_local_request('POST', url, json=payload, timeout=15)
-            if res.status_code == 200:
-                return res.json().get("message", {}).get("content", "").strip()
-        except Exception as e:
-            print(f"[Local Ollama Error] Query failed: {e}")
+    """Query the AI assistant. Uses remote Flask server."""
+    try:
+        url = f"{FLASK_SERVER}/api/voice/query"
+        payload = {"query": query_text}
+        res = make_local_request('POST', url, json=payload, timeout=20)
+        if res.status_code == 200:
+            return res.json().get("content", "").strip()
+    except Exception as e:
+        print(f"[Remote Voice Query Error] {e}")
             
     # Local fallback responses if backend is unreachable
     query_lower = query_text.lower()

@@ -652,16 +652,22 @@ export default function Dashboard() {
   };
 
   useEffect(() => {
-    // Load config & name
+    // Route Guard: Prevent skipping onboarding
     const savedName = localStorage.getItem("chronos-username");
+    const savedTwin = localStorage.getItem("chronos-performance-twin");
+    if (!savedName || !savedTwin) {
+      router.push('/');
+      return;
+    }
+
     const nameVal = savedName || "user";
     setUsername(nameVal);
 
-    const savedTwin = localStorage.getItem("chronos-performance-twin") || `### PERFORMANCE TWIN PROFILE (DEMO)
+    const twinVal = savedTwin || `### PERFORMANCE TWIN PROFILE (DEMO)
 - **Procrastination Risk**: MEDIUM
 - **Peak Focus Window**: 8:00 PM - 12:00 AM
 - **Primary Source of Delay**: Scope Creep & Perfectionism`;
-    setPerformanceTwin(savedTwin);
+    setPerformanceTwin(twinVal);
 
     const savedConfig = localStorage.getItem("chronos-ai-config");
     const configVal = savedConfig ? JSON.parse(savedConfig) : {
@@ -702,6 +708,17 @@ export default function Dashboard() {
           if (data.failureCount !== undefined) setFailureCount(Number(data.failureCount));
           if (data.streakCount !== undefined) setStreakCount(Number(data.streakCount));
           if (data.totalRecoveredHours !== undefined) setTotalRecoveredHours(Number(data.totalRecoveredHours));
+          if (data.aiProvider) {
+            const configObj = {
+              provider: data.aiProvider,
+              apiUrl: data.aiApiUrl || '',
+              apiKey: data.aiApiKey || '',
+              model: data.aiModel || 'gemini-1.5-flash',
+              maxQuestions: 7
+            };
+            setAiConfig(configObj);
+            localStorage.setItem("chronos-ai-config", JSON.stringify(configObj));
+          }
         }
       } catch (err) {
         console.warn("Failed to fetch settings from backend on dashboard mount", err);
@@ -776,6 +793,17 @@ export default function Dashboard() {
 
     let active = true;
     const fetchModelsAndValidate = async () => {
+      // Don't validate if key is incomplete/empty
+      if (provider !== 'custom' && (!apiKey || apiKey.trim().length <= 5)) {
+        if (openSettings) {
+          setSettingsConnectionStatus('offline');
+          setSettingsConnectionError('API Key is incomplete.');
+        } else {
+          setAiConnectionStatus('offline');
+        }
+        return;
+      }
+
       if (openSettings) {
         setSettingsLoadingModels(true);
         setSettingsConnectionStatus('checking');
@@ -799,11 +827,11 @@ export default function Dashboard() {
             if (openSettings) {
               setSettingsConnectionStatus('offline');
               setSettingsConnectionError(
-                settingsProvider === 'ollama'
-                  ? "OLLAMA OFFLINE: Chronos cannot communicate with your local AI core. Please launch the Ollama application, verify it is running on http://localhost:11434, and ensure you have pulled a model (e.g. 'ollama pull llama3')."
-                  : settingsProvider === 'gemini'
-                    ? "GEMINI OFFLINE: Unreachable or API Key is invalid. Please verify your Google Gemini API Key."
-                    : "NVIDIA NIM OFFLINE: Unreachable or API Key is invalid. Please verify your NVIDIA API Key (nvapi-...) has active credits."
+                settingsProvider === 'gemini'
+                  ? "GEMINI OFFLINE: Unreachable or API Key is invalid. Please verify your Google Gemini API Key."
+                  : settingsProvider === 'nvidia'
+                    ? "NVIDIA NIM OFFLINE: Unreachable or API Key is invalid. Please verify your NVIDIA API Key (nvapi-...) has active credits."
+                    : "CUSTOM CORE OFFLINE: Unreachable or verification failed. Please check your Base URL and settings."
               );
             } else {
               setAiConnectionStatus('offline');
@@ -827,11 +855,11 @@ export default function Dashboard() {
           if (openSettings) {
             setSettingsConnectionStatus('offline');
             setSettingsConnectionError(
-              settingsProvider === 'ollama'
-                ? "CONNECTION ERROR: Could not connect to the local server or Ollama port. Verify that the Ollama app is running locally."
-                : settingsProvider === 'gemini'
-                  ? "CONNECTION ERROR: Could not reach the Google Gemini API. Verify your API Key and internet connection."
-                  : "CONNECTION ERROR: Could not reach the NVIDIA NIM API. Verify your API Key and internet connection."
+              settingsProvider === 'gemini'
+                ? "CONNECTION ERROR: Could not reach the Google Gemini API. Verify your API Key and internet connection."
+                : settingsProvider === 'nvidia'
+                  ? "CONNECTION ERROR: Could not reach the NVIDIA NIM API. Verify your API Key and internet connection."
+                  : "CONNECTION ERROR: Could not reach your Custom API endpoint. Verify your Base URL and internet connection."
             );
           } else {
             setAiConnectionStatus('offline');
@@ -844,7 +872,7 @@ export default function Dashboard() {
       }
     };
 
-    const delayDebounce = setTimeout(fetchModelsAndValidate, 500);
+    const delayDebounce = setTimeout(fetchModelsAndValidate, 1500);
 
     return () => {
       active = false;
@@ -853,7 +881,7 @@ export default function Dashboard() {
   }, [settingsProvider, settingsApiUrl, settingsApiKey, openSettings, settingsRecheckTrigger, aiConfig]);
 
   const handleSaveSettings = async () => {
-    if (settingsProvider !== 'ollama' && !settingsApiKey.trim()) {
+    if (settingsProvider !== 'custom' && !settingsApiKey.trim()) {
       toast.error("API Key is mandatory for this supplier.");
       return;
     }
@@ -2366,6 +2394,7 @@ Your current plan is achievable if no major integration issues occur. Avoid intr
       analyzeBehaviorAndUpdateTwin(newHistory);
     } catch (err: any) {
       console.warn("Estimation assistant API failed, using rule-based fallback:", err);
+      toast.error("AI Core offline. Running in local fallback mode.");
       
       let reply = "";
       const userMessageCount = updatedHistory.filter(m => m.role === 'user').length;
@@ -2978,15 +3007,15 @@ Your current plan is achievable if no major integration issues occur. Avoid intr
               </div>
               <div className="space-y-0.5">
                 <span className="text-gray-600 block text-[8px] tracking-wider">Core Provider</span>
-                <span className="text-[#c084fc] font-bold text-[11px] block">{aiConfig?.provider || 'Ollama'}</span>
+                <span className="text-[#c084fc] font-bold text-[11px] block">{aiConfig?.provider || 'Gemini'}</span>
               </div>
               <div className="space-y-0.5">
                 <span className="text-gray-600 block text-[8px] tracking-wider">Active Engine</span>
-                <span className="text-[#8A2BE2] font-bold text-[10px] block max-w-[220px] truncate">{aiConfig?.model || 'llama3'}</span>
+                <span className="text-[#8A2BE2] font-bold text-[10px] block max-w-[220px] truncate">{aiConfig?.model || 'gemini-1.5-flash'}</span>
               </div>
               <div className="space-y-0.5">
                 <span className="text-gray-600 block text-[8px] tracking-wider">Endpoint Address</span>
-                <span className="text-gray-500 block text-[8px] max-w-[240px] truncate">{aiConfig?.apiUrl || 'http://localhost:11434'}</span>
+                <span className="text-gray-500 block text-[8px] max-w-[240px] truncate">{aiConfig?.apiUrl || 'https://generativelanguage.googleapis.com/v1beta'}</span>
               </div>
               <div className="space-y-0.5">
                 <span className="text-gray-600 block text-[8px] tracking-wider">System State</span>
@@ -4125,7 +4154,7 @@ Your current plan is achievable if no major integration issues occur. Avoid intr
                     <label className="block text-[10px] font-bold uppercase tracking-widest text-gray-400">
                       AI Supplier Engine
                     </label>
-                    <div className="grid grid-cols-4 gap-2">
+                    <div className="grid grid-cols-3 gap-2">
                       <button
                         type="button"
                         onClick={() => {
@@ -4141,22 +4170,6 @@ Your current plan is achievable if no major integration issues occur. Avoid intr
                         }`}
                       >
                         Gemini
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => {
-                          setSettingsProvider('ollama');
-                          setSettingsApiUrl('http://localhost:11434');
-                          setSettingsModel('llama3');
-                          setSettingsAvailableModels([]);
-                        }}
-                        className={`py-2 rounded-lg font-bold text-[9px] uppercase tracking-wider border transition-all cursor-pointer ${
-                          settingsProvider === 'ollama' 
-                            ? 'bg-[#06C6B3]/20 border-[#06C6B3] text-[#06C6B3]' 
-                            : 'bg-[#1F2833]/40 border-gray-700 text-gray-400 hover:border-gray-500'
-                        }`}
-                      >
-                        Ollama
                       </button>
                       <button
                         type="button"
@@ -4193,22 +4206,20 @@ Your current plan is achievable if no major integration issues occur. Avoid intr
                     </div>
                   </div>
 
-                  {(settingsProvider === 'nvidia' || settingsProvider === 'custom' || settingsProvider === 'gemini') && (
-                    <div className="space-y-1">
-                      <label className="block text-[10px] font-bold uppercase tracking-widest text-gray-400">
-                        {settingsProvider === 'nvidia' ? 'NVIDIA API Key' : settingsProvider === 'gemini' ? 'Google Gemini API Key' : 'API Key (Optional)'}
-                      </label>
-                      <input
-                        type="password"
-                        required={settingsProvider === 'nvidia' || settingsProvider === 'gemini'}
-                        placeholder={settingsProvider === 'nvidia' ? "nvapi-..." : settingsProvider === 'gemini' ? "Google Gemini API Key..." : "API Key..."}
-                        value={settingsApiKey}
-                        onChange={e => setSettingsApiKey(e.target.value)}
-                        className="w-full rounded-lg px-4 py-2.5 text-xs focus:ring-1 focus:ring-[#8A2BE2] focus:outline-none border border-gray-700 font-mono"
-                        style={{ backgroundColor: '#1F2833', color: '#8A2BE2' }}
-                      />
-                    </div>
-                  )}
+                  <div className="space-y-1">
+                    <label className="block text-[10px] font-bold uppercase tracking-widest text-gray-400">
+                      {settingsProvider === 'nvidia' ? 'NVIDIA API Key' : settingsProvider === 'gemini' ? 'Google Gemini API Key' : 'API Key (Optional)'}
+                    </label>
+                    <input
+                      type="password"
+                      required={settingsProvider === 'nvidia' || settingsProvider === 'gemini'}
+                      placeholder={settingsProvider === 'nvidia' ? "nvapi-..." : settingsProvider === 'gemini' ? "Google Gemini API Key..." : "API Key..."}
+                      value={settingsApiKey}
+                      onChange={e => setSettingsApiKey(e.target.value)}
+                      className="w-full rounded-lg px-4 py-2.5 text-xs focus:ring-1 focus:ring-[#8A2BE2] focus:outline-none border border-gray-700 font-mono"
+                      style={{ backgroundColor: '#1F2833', color: '#8A2BE2' }}
+                    />
+                  </div>
 
                   {settingsProvider === 'custom' && (
                     <div className="space-y-1">
@@ -4267,12 +4278,6 @@ Your current plan is achievable if no major integration issues occur. Avoid intr
                     <span className="text-[#06C6B3] font-bold uppercase block tracking-wider border-b border-white/5 pb-1">💡 Provider Model Recommendations:</span>
                     
                     <div className="space-y-2 max-h-[180px] overflow-y-auto pr-1 scrollbar-thin">
-                      {/* Ollama */}
-                      <div className="p-2 bg-black/40 border border-white/5 rounded-lg space-y-1">
-                        <div className="text-[#06C6B3] font-bold uppercase text-[9px]">🦙 Ollama (Local)</div>
-                        <div className="text-[8px] text-gray-400">• Min Spec: <code className="text-[#c084fc]">qwen2.5:1.5b</code> (low memory usage)</div>
-                        <div className="text-[8px] text-gray-400">• Nominal: <code className="text-[#66FCF1]">qwen2.5:3b</code> or <code className="text-[#66FCF1]">gemma2:2b</code> (recommended)</div>
-                      </div>
 
                       {/* Gemini */}
                       <div className="p-2 bg-black/40 border border-white/5 rounded-lg space-y-1">
@@ -4448,9 +4453,7 @@ Your current plan is achievable if no major integration issues occur. Avoid intr
                     </div>
                   </div>
 
-                  <div className="p-3 rounded-xl bg-purple-950/20 border border-purple-800/30 text-purple-300 font-mono text-[9px] uppercase tracking-wider leading-relaxed">
-                    <span>🛡️ Operator Notice:</span> Press the <code className="bg-black/30 px-1 py-0.5 rounded text-amber-400">`</code> (backtick) key twice at any time to silence Chronos speech.
-                  </div>
+
                 </div>
               )}
 

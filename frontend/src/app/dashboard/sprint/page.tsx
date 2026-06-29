@@ -110,6 +110,14 @@ function SprintPageContent() {
 
   // Load Task details
   useEffect(() => {
+    // Route Guard: Prevent skipping onboarding
+    const savedName = localStorage.getItem("chronos-username");
+    const savedTwin = localStorage.getItem("chronos-performance-twin");
+    if (!savedName || !savedTwin) {
+      router.push('/');
+      return;
+    }
+
     if (!taskId) {
       toast.error("Invalid task ID.");
       router.push('/dashboard');

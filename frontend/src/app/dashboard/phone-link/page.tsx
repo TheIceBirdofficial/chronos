@@ -9,24 +9,66 @@ import { Toaster } from "@/components/ui/sonner";
 
 export default function PhoneLinkPage() {
   const router = useRouter();
-  const [ntfyTopic, setNtfyTopic] = useState<string>("chronos-alerts-user");
+  
+  const generateRandomNtfyTopic = () => {
+    const chars = 'abcdefghijklmnopqrstuvwxyz0123456789';
+    let rand = '';
+    for (let i = 0; i < 6; i++) {
+      rand += chars.charAt(Math.floor(Math.random() * chars.length));
+    }
+    return `chronos_alerts_${rand}`;
+  };
+
+  const [ntfyTopic, setNtfyTopic] = useState<string>(() => {
+    // Generate secure default initially
+    const chars = 'abcdefghijklmnopqrstuvwxyz0123456789';
+    let rand = '';
+    for (let i = 0; i < 6; i++) {
+      rand += chars.charAt(Math.floor(Math.random() * chars.length));
+    }
+    return `chronos_alerts_${rand}`;
+  });
   const [testSuccess, setTestSuccess] = useState<boolean | null>(null);
   const [loading, setLoading] = useState(false);
   const [isTransitioning, setIsTransitioning] = useState(true);
 
   useEffect(() => {
+    // Route Guard: Prevent skipping onboarding
+    const savedName = localStorage.getItem("chronos-username");
+    const savedTwin = localStorage.getItem("chronos-performance-twin");
+    if (!savedName || !savedTwin) {
+      router.push('/');
+      return;
+    }
+
     setIsTransitioning(false);
     // Load from backend settings or localStorage
     fetch(`${API_BASE}/api/settings`)
       .then(res => res.json())
       .then(data => {
-        if (data.ntfyTopic) {
+        if (data.ntfyTopic && data.ntfyTopic.trim() !== '' && !data.ntfyTopic.startsWith('chronos-alerts-')) {
           setNtfyTopic(data.ntfyTopic);
+          localStorage.setItem("chronos-ntfy-topic", data.ntfyTopic);
+        } else {
+          const saved = localStorage.getItem("chronos-ntfy-topic");
+          if (saved && saved.trim() !== '' && !saved.startsWith('chronos-alerts-')) {
+            setNtfyTopic(saved);
+          } else {
+            const rand = generateRandomNtfyTopic();
+            setNtfyTopic(rand);
+            localStorage.setItem("chronos-ntfy-topic", rand);
+          }
         }
       })
       .catch(() => {
         const saved = localStorage.getItem("chronos-ntfy-topic");
-        if (saved) setNtfyTopic(saved);
+        if (saved && saved.trim() !== '' && !saved.startsWith('chronos-alerts-')) {
+          setNtfyTopic(saved);
+        } else {
+          const rand = generateRandomNtfyTopic();
+          setNtfyTopic(rand);
+          localStorage.setItem("chronos-ntfy-topic", rand);
+        }
       });
   }, []);
 
@@ -68,13 +110,14 @@ export default function PhoneLinkPage() {
     setLoading(true);
     setTestSuccess(null);
     try {
-      const res = await fetch(`https://ntfy.sh/${ntfyTopic}`, {
+      const res = await fetch(`${API_BASE}/api/phone/test`, {
         method: 'POST',
         headers: {
-          'Title': 'Chronos Synchronization',
-          'Priority': 'high'
+          'Content-Type': 'application/json'
         },
-        body: 'Chronos Phone Link successfully verified! Real-time telemetry alerts are now active.'
+        body: JSON.stringify({
+          ntfyTopic: ntfyTopic
+        })
       });
       if (res.ok) {
         setTestSuccess(true);
@@ -146,12 +189,12 @@ export default function PhoneLinkPage() {
               <input
                 type="text"
                 value={ntfyTopic}
-                onChange={e => setNtfyTopic(e.target.value.trim())}
-                placeholder="e.g. chronos-alerts-operator"
-                className="w-full rounded-lg px-4 py-2.5 text-xs bg-[#1F2833]/40 border border-gray-700 text-gray-200 focus:outline-none focus:border-[#0099FF]/40 transition-all font-mono"
+                readOnly
+                placeholder="Generating subscription topic..."
+                className="w-full rounded-lg px-4 py-2.5 text-xs bg-[#1F2833]/20 border border-gray-800 text-gray-400 focus:outline-none transition-all font-mono select-all cursor-not-allowed"
               />
               <p className="text-[8px] text-gray-500 leading-normal">
-                Avoid generic names so your alerts are private and not intercepted by other clients.
+                This unique subscription topic is randomly generated to secure your Out-of-Band warnings channel.
               </p>
             </div>
 
