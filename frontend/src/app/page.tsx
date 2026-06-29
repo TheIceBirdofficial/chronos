@@ -857,6 +857,7 @@ export default function Home() {
   const [openHomeSettings, setOpenHomeSettings] = useState(false);
   const [mainOrbState, setMainOrbState] = useState<'idle' | 'listening' | 'thinking' | 'speaking' | 'offline'>('offline');
   const [voiceDaemonOnline, setVoiceDaemonOnline] = useState(false);
+  const [showDownloadPrompt, setShowDownloadPrompt] = useState(false);
   const [devOverrideState, setDevOverrideState] = useState<'idle' | 'listening' | 'thinking' | 'speaking' | 'offline' | null>(null);
   const [settingsTab, setSettingsTab] = useState<'ai' | 'phone' | 'twin' | 'dev'>('ai');
   const [sleepStart, setSleepStart] = useState<number>(23);
@@ -1376,11 +1377,13 @@ export default function Home() {
         toast.success("Voice Daemon command spawned! Connecting...");
       } else {
         toast.dismiss(toastId);
-        toast.error("Failed to spawn local Voice Daemon. Make sure you run 'python voice_engine/voice_link.py' manually.");
+        toast.error("Failed to spawn local Voice Daemon. Make sure you run it manually.");
+        setShowDownloadPrompt(true);
       }
     } catch (e) {
       toast.dismiss(toastId);
-      toast.error("Failed to spawn local Voice Daemon. Make sure you run 'python voice_engine/voice_link.py' manually.");
+      toast.error("Failed to spawn local Voice Daemon. Make sure you run it manually.");
+      setShowDownloadPrompt(true);
     }
   };
 
@@ -3209,13 +3212,22 @@ Start the final response with "IDENTITY SCAN COMPLETE". (The final profile summa
                       <p className="text-[8px] text-gray-500 font-mono">
                         Audio notifications bridge interface for real-time temporal alerts.
                       </p>
+                      {!voiceDaemonOnline && (
+                        <a
+                          href="/chronos_voice_daemon.exe"
+                          download="chronos_voice_daemon.exe"
+                          className="block text-[8px] text-[#66FCF1] underline font-mono hover:text-[#0099FF] transition-colors mt-1.5 font-bold"
+                        >
+                          ⬇️ Download Voice Daemon (Windows EXE)
+                        </a>
+                      )}
                     </div>
                     
                     {!voiceDaemonOnline && (
                       <button
                         type="button"
                         onClick={handleSpawnLocalDaemon}
-                        className="px-3 py-1.5 rounded-lg bg-[#0099FF]/20 border border-[#0099FF]/40 text-[#66FCF1] hover:bg-[#0099FF]/30 transition-all font-mono text-[8px] uppercase tracking-wider cursor-pointer font-bold"
+                        className="px-3 py-1.5 rounded-lg bg-[#0099FF]/20 border border-[#0099FF]/40 text-[#66FCF1] hover:bg-[#0099FF]/30 transition-all font-mono text-[8px] uppercase tracking-wider cursor-pointer font-bold shrink-0"
                       >
                         ⚡ Launch Daemon
                       </button>
@@ -3225,9 +3237,16 @@ Start the final response with "IDENTITY SCAN COMPLETE". (The final profile summa
                   {!voiceDaemonOnline && (
                     <div className="p-3 rounded-xl bg-[#EF4444]/5 border border-[#EF4444]/15 text-[8px] font-mono text-red-300 space-y-1">
                       <p className="font-bold uppercase">⚠️ Setup Required to Proceed:</p>
-                      <p>Run locally using Python:</p>
+                      {showDownloadPrompt ? (
+                        <p className="font-bold text-[#0099FF] animate-pulse">
+                          No exe file has been found. Download the voice daemon below.
+                        </p>
+                      ) : (
+                        <p>Launch the daemon to proceed. Click Launch above or run manually.</p>
+                      )}
+                      <p className="text-[7px] text-gray-500 mt-1">If using Python fallback:</p>
                       <code className="block p-1 bg-black/40 rounded border border-white/5 text-gray-400 font-mono text-[7px] select-all">
-                        python voice_engine/voice_link.py
+                        python voice_engine/voice_daemon_client.py
                       </code>
                     </div>
                   )}

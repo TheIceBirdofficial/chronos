@@ -2691,19 +2691,41 @@ def start_local_daemon():
     try:
         import subprocess
         import sys
-        # Path to voice_link.py in voice_engine folder
-        script_path = os.path.join(os.path.dirname(__file__), 'voice_engine', 'voice_link.py')
+        
+        # Check standard locations for the compiled EXE file
+        user_profile = os.environ.get("USERPROFILE", os.path.expanduser("~"))
+        search_paths = [
+            os.path.join(user_profile, "Desktop", "chronos_voice_daemon.exe"),
+            os.path.join(user_profile, "Downloads", "chronos_voice_daemon.exe"),
+            os.path.join(os.path.dirname(__file__), "chronos_voice_daemon.exe"),
+            os.path.join(os.path.dirname(__file__), "..", "chronos_voice_daemon.exe"),
+            os.path.join(os.path.dirname(__file__), "..", "dist", "chronos_voice_daemon.exe"),
+            os.path.join(os.path.dirname(__file__), "frontend", "chronos_voice_daemon.exe"),
+            os.path.join(os.path.dirname(__file__), "..", "frontend", "chronos_voice_daemon.exe")
+        ]
+        
+        exe_path = None
+        for path in search_paths:
+            if os.path.exists(path):
+                exe_path = path
+                break
+                
+        if exe_path:
+            print(f"[Voice Automation] Launching local exe: {exe_path}", flush=True)
+            subprocess.Popen([exe_path], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            return jsonify({"status": "spawning", "method": "exe"})
+            
+        # Fallback to python script
+        script_path = os.path.join(os.path.dirname(__file__), 'voice_engine', 'voice_daemon_client.py')
         if not os.path.exists(script_path):
-            # Try parent directory fallback
-            script_path = os.path.join(os.path.dirname(__file__), '..', 'voice_engine', 'voice_link.py')
+            script_path = os.path.join(os.path.dirname(__file__), '..', 'voice_engine', 'voice_daemon_client.py')
             
         if os.path.exists(script_path):
-            print(f"[Voice Automation] Spawning local voice daemon: {script_path}", flush=True)
-            # Spawn the subprocess asynchronously without waiting for it
+            print(f"[Voice Automation] Launching local script: {script_path}", flush=True)
             subprocess.Popen([sys.executable, script_path], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            return jsonify({"status": "spawning"})
+            return jsonify({"status": "spawning", "method": "script"})
         else:
-            return jsonify({"error": f"Script not found at {script_path}"}), 404
+            return jsonify({"error": "No voice daemon executable or script found. Please download the voice daemon below."}), 404
     except Exception as e:
         print(f"[Voice Automation Error] Failed to launch daemon: {e}", flush=True)
         return jsonify({"error": str(e)}), 500
