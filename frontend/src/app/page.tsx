@@ -1461,7 +1461,7 @@ export default function Home() {
   };
 
   const handleSpawnLocalDaemon = async () => {
-    toast.info("Download the daemon and run it manually. Alt+C for voice anywhere.");
+    toast.info("Download the daemon and run it manually.");
     setShowDownloadPrompt(true);
   };
 
@@ -3372,8 +3372,8 @@ Start the final response with "IDENTITY SCAN COMPLETE". (The final profile summa
 
                         {/* Description */}
                         <p className="text-[9px] text-gray-400 font-mono leading-relaxed">
-                          The Chronos Voice Daemon runs locally on your machine. It enables global hotkey voice commands (Alt+C),
-                          proactive AI alerts spoken through your speakers, and wake-word detection — all without sending audio to the cloud.
+                          The Chronos Voice Daemon runs locally on your machine. It enables low-latency text-to-speech,
+                          proactive AI alerts spoken through your speakers — all without sending audio to the cloud.
                         </p>
 
                         {/* Download button — Windows only, not yet connected */}
