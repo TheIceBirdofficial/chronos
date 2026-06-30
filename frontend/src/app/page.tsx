@@ -1048,21 +1048,7 @@ export default function Home() {
     return () => clearInterval(interval);
   }, []);
 
-  useEffect(() => {
-    let interval: NodeJS.Timeout;
-    const sendHeartbeat = async () => {
-      try {
-        await fetch('http://127.0.0.1:43210/heartbeat', { mode: 'cors' });
-      } catch (e) {
-        // Ignore connection failures when daemon is not running
-      }
-    };
-    sendHeartbeat();
-    interval = setInterval(sendHeartbeat, 3000);
-    return () => clearInterval(interval);
-  }, []);
 
-  useEffect(() => {
     const eventSource = new EventSource(`${API_BASE}/api/voice/events`);
 
     eventSource.onmessage = (event) => {
@@ -3360,7 +3346,7 @@ Start the final response with "IDENTITY SCAN COMPLETE". (The final profile summa
                           <div className="grid grid-cols-2 gap-1.5">
                             {[
                               { icon: '🎙️', label: 'Alt+C global hotkey' },
-                              { icon: '🔊', label: 'Local Kokoro TTS' },
+                              { icon: '🔊', label: 'Low-latency system TTS' },
                               { icon: '🧠', label: 'Proactive AI alerts' },
                               { icon: '🔒', label: 'No cloud audio' },
                             ].map(({ icon, label }) => (

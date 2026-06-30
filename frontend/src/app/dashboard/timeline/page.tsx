@@ -290,12 +290,21 @@ Reply in 1-2 sentences concluding that their timeline calibration is complete an
         }));
       } else if (cfg && cfg.apiKey) {
         try {
+          const score = t.survivalScore ?? 100;
+          const escalation = t.escalationLevel ?? 'green';
+          const urgencyMsg = 
+            escalation === 'black' ? "CRITICAL DEADLINE COLLAPSED: Frame steps as post-deadline recovery, damage control and triage actions." :
+            escalation === 'red' ? "CRITICAL DANGER: Frame steps as emergency speed run, core functionality only, discard all nice-to-haves." :
+            escalation === 'orange' ? "HIGH RISK: Frame steps as focused, speed-optimized execution tasks." :
+            "RELAXED/STANDARD: Frame steps as deliberate, quality-focused execution tasks.";
+
           const prompt = `You are Chronos, a tactical AI deadline defense system.
-Task: "${t.title}" (estimated ${t.estimatedHours}h total, importance: ${t.importance})
+Task: "${t.title}" (estimated ${t.estimatedHours}h total, importance: ${t.importance}, survival score: ${score}%)
 Milestone: "${mile.title}" (scheduled: ${mile.scheduledTime})
+Urgency context: ${urgencyMsg}
 
 Generate EXACTLY 3 to 5 highly specific, actionable checkpoint steps for this milestone.
-Each checkpoint should be a concrete micro-task (not generic).
+Each checkpoint should be a concrete micro-task (not generic) and reflect the urgency context.
 Respond ONLY with a raw JSON array of objects with keys:
 - "title": short specific action (max 8 words)
 - "detail": one-sentence description of what exactly to do

@@ -1,13 +1,23 @@
-"""Chronos Voice Daemon — Cross-platform global hotkey (Alt+C) voice assistant.
+"""Chronos Voice Daemon — Silent system tray with Alt+C global hotkey.
 
-Uses Google Cloud STT + TTS APIs (no local model files).
-Requires: pynput, sounddevice, requests
+Architecture:
+  - pystray: system tray icon (status + right-click menu)
+  - Alt+C:   global hotkey → Google STT → AI chat → Google TTS response
+  - Second Alt+C during speech: interrupt and restart listening
+  - Browser heartbeat (POST /heartbeat every 5–10s) keeps daemon alive
+  - No heartbeat for >30s + 5s grace → clean self-termination
+  - SSE listener: receives backend proactive alerts, speaks them
+  - No console window: use pythonw or PyInstaller with console=False
 
-Run directly: python voice_daemon_exe_entry.py [--standalone]
-Build EXE:    pyinstaller chronos_voice_daemon.spec
+Build EXE (no console):
+    pyinstaller chronos_voice_daemon.spec
+
+Run directly (development):
+    pythonw voice_daemon_exe_entry.py
 """
 import os
 import sys
+import io
 import time
 import json
 import base64
@@ -16,33 +26,35 @@ import hashlib
 import subprocess
 import threading
 import urllib.request
-import struct
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
 
 # ── Config ──────────────────────────────────────────────────────────────
 API_URLS = [
-    'http://127.0.0.1:5000',  # dev fallback
+    'http://127.0.0.1:5000',
     'https://chronos-backend-410257364704.europe-west1.run.app',
 ]
-SAMPLE_RATE = 16000
+SAMPLE_RATE    = 16000
 RECORD_SECONDS = 8
+HEARTBEAT_TIMEOUT = 30  # seconds; standalone mode skips this
 SILENCE_THRESHOLD = 0.02
-SILENCE_DURATION = 1.0
-HEARTBEAT_TIMEOUT = 30  # seconds before auto-shutdown (standalone disables)
+DAEMON_PORT    = 43210
 
-# ── State ──────────────────────────────────────────────────────────────
-last_heartbeat = time.time()
-google_api_key = ""
-backend_url = ""
-user_id = ""
-standalone = '--standalone' in sys.argv
-speech_queue = queue.Queue()
-recording_lock = threading.Lock()
-is_recording = False
-_spoken_hashes: set = set()   # dedup — prevents repeating identical phrases
+# ── State ────────────────────────────────────────────────────────────────
+last_heartbeat   = time.time()
+google_api_key   = ""
+backend_url      = ""
+user_id          = ""
+standalone       = '--standalone' in sys.argv
+speech_queue     = queue.Queue()
+recording_lock   = threading.Lock()
+is_recording     = False
+is_speaking      = False          # True while Google TTS audio is playing
+_spoken_hashes: set = set()       # dedup — skips identical phrases
+_tray_icon       = None           # pystray icon instance (set in main)
+_tray_status     = "Starting..."  # shown in tray title
 
-# ── Sounddevice helpers (lazy-import to keep startup fast) ─────────────
+# ── Sounddevice lazy-import ──────────────────────────────────────────────
 _sd = None
 _np = None
 
@@ -56,15 +68,83 @@ def _ensure_audio():
         _np = np
     return _sd, _np
 
+# ── Tray helpers ─────────────────────────────────────────────────────────
+def _set_tray_status(text: str):
+    global _tray_status
+    _tray_status = text
+    if _tray_icon is not None:
+        try:
+            _tray_icon.title = f"Chronos Voice — {text}"
+            _tray_icon.update_menu()
+        except Exception:
+            pass
 
-# ── Google Cloud STT ───────────────────────────────────────────────────
-def google_stt(audio_bytes):
-    if not google_api_key:
-        print("[STT] No API key configured.", flush=True)
-        return ""
-    sd, np = _ensure_audio()
+def _tray_status_item():
+    """Dynamic tray menu item showing current status."""
+    import pystray
+    return pystray.MenuItem(
+        lambda _: f"⬤  {_tray_status}",
+        action=None,
+        enabled=False
+    )
+
+def _open_logs():
+    log_path = Path(os.environ.get('LOCALAPPDATA', Path.home())) / 'ChronosVoice' / 'daemon.log'
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    if not log_path.exists():
+        log_path.write_text("[Chronos Voice] No log entries yet.\n")
+    subprocess.Popen(['notepad.exe', str(log_path)],
+                     creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
+
+def _restart_voice():
+    _set_tray_status("Restarting SSE...")
+    # Restart the SSE listener threads
+    for url in API_URLS:
+        threading.Thread(target=sse_listener, args=(url,), daemon=True).start()
+    _set_tray_status("Connected")
+
+def _exit_daemon():
+    _set_tray_status("Stopping...")
+    if _tray_icon is not None:
+        try:
+            _tray_icon.stop()
+        except Exception:
+            pass
+    time.sleep(0.5)
+    os._exit(0)
+
+def _build_icon():
+    """Generate a minimal Chronos 'C' tray icon at runtime using Pillow."""
     try:
-        b64 = base64.b64encode(audio_bytes).decode('utf-8')
+        from PIL import Image, ImageDraw, ImageFont
+        size = 64
+        img = Image.new('RGBA', (size, size), (0, 0, 0, 0))
+        draw = ImageDraw.Draw(img)
+        # Deep purple circle
+        draw.ellipse([2, 2, size - 2, size - 2], fill=(100, 30, 200, 255))
+        # White 'C'
+        try:
+            font = ImageFont.truetype("arial.ttf", 36)
+        except Exception:
+            font = ImageFont.load_default()
+        draw.text((16, 10), "C", fill=(255, 255, 255, 255), font=font)
+        return img
+    except Exception:
+        # Ultra-minimal fallback: solid purple square
+        try:
+            from PIL import Image
+            img = Image.new('RGBA', (32, 32), (100, 30, 200, 255))
+            return img
+        except Exception:
+            return None
+
+# ── Google Cloud STT ─────────────────────────────────────────────────────
+def google_stt(audio_bytes: bytes) -> str:
+    if not google_api_key:
+        print("[STT] No API key.", flush=True)
+        return ""
+    try:
+        b64 = base64.b64encode(audio_bytes).decode()
         url = f"https://speech.googleapis.com/v1/speech:recognize?key={google_api_key}"
         body = json.dumps({
             "config": {
@@ -74,21 +154,21 @@ def google_stt(audio_bytes):
                 "model": "latest_short"
             },
             "audio": {"content": b64}
-        }).encode('utf-8')
-        req = urllib.request.Request(url, data=body, headers={'Content-Type': 'application/json'})
+        }).encode()
+        req = urllib.request.Request(url, data=body,
+                                     headers={'Content-Type': 'application/json'})
         with urllib.request.urlopen(req, timeout=10) as res:
             data = json.loads(res.read())
-        if 'results' in data and data['results']:
+        if data.get('results'):
             return data['results'][0]['alternatives'][0]['transcript']
     except Exception as e:
         print(f"[STT Error] {e}", flush=True)
     return ""
 
-
-# ── Google Cloud TTS ───────────────────────────────────────────────────
-def google_tts(text):
+# ── Google Cloud TTS ─────────────────────────────────────────────────────
+def google_tts(text: str):
+    """Returns raw LINEAR16 audio bytes or None."""
     if not google_api_key:
-        print(f"[TTS] No API key — printing: {text}", flush=True)
         return None
     try:
         url = f"https://texttospeech.googleapis.com/v1/text:synthesize?key={google_api_key}"
@@ -96,8 +176,9 @@ def google_tts(text):
             "input": {"text": text},
             "voice": {"languageCode": "en-US", "name": "en-US-Neural2-F"},
             "audioConfig": {"audioEncoding": "LINEAR16", "speakingRate": 1.1}
-        }).encode('utf-8')
-        req = urllib.request.Request(url, data=body, headers={'Content-Type': 'application/json'})
+        }).encode()
+        req = urllib.request.Request(url, data=body,
+                                     headers={'Content-Type': 'application/json'})
         with urllib.request.urlopen(req, timeout=15) as res:
             data = json.loads(res.read())
         audio_b64 = data.get('audioContent', '')
@@ -107,46 +188,63 @@ def google_tts(text):
         print(f"[TTS Error] {e}", flush=True)
     return None
 
-
-# ── Audio capture ──────────────────────────────────────────────────────
-def record_audio():
+# ── Audio capture ────────────────────────────────────────────────────────
+def record_audio() -> bytes:
     sd, np = _ensure_audio()
-    print("[Mic] Recording... (speak now)", flush=True)
+    print("[Mic] Recording...", flush=True)
     audio = sd.rec(int(SAMPLE_RATE * RECORD_SECONDS),
                    samplerate=SAMPLE_RATE, channels=1, dtype='float64')
     sd.wait()
-    audio_float = audio.flatten()
-    audio_int16 = (audio_float * 32767).astype(np.int16)
+    audio_int16 = (audio.flatten() * 32767).astype(np.int16)
     return audio_int16.tobytes()
 
+# ── Playback ─────────────────────────────────────────────────────────────
+_playback_sd = None  # sounddevice stream for interrupt support
 
-# ── Playback ───────────────────────────────────────────────────────────
-def play_audio(wav_bytes):
+def play_audio(wav_bytes: bytes):
+    """Play LINEAR16 audio. Sets is_speaking flag; resets on completion or interrupt."""
+    global is_speaking, _playback_sd
     sd, np = _ensure_audio()
-    if wav_bytes is None:
+    if not wav_bytes:
         return
     try:
-        audio_data = np.frombuffer(wav_bytes, dtype=np.int16)
-        sd.play(audio_data, SAMPLE_RATE)
+        is_speaking = True
+        _set_tray_status("Speaking")
+        audio_data = np.frombuffer(wav_bytes, dtype=np.int16).astype(np.float32) / 32768.0
+        _playback_sd = sd.play(audio_data, SAMPLE_RATE)
         sd.wait()
     except Exception as e:
         print(f"[Playback Error] {e}", flush=True)
+    finally:
+        is_speaking = False
+        _playback_sd = None
+        _set_tray_status("Connected")
 
+def interrupt_speech():
+    """Stop ongoing playback immediately."""
+    global is_speaking
+    try:
+        _sd and _sd.stop()
+    except Exception:
+        pass
+    is_speaking = False
 
-def speak_text(text):
-    """Speak text using Google Cloud TTS (preferred) or Windows System.Speech (fallback).
-    Deduplicates messages — identical phrases spoken within the same session are ignored."""
+# ── speak_text ───────────────────────────────────────────────────────────
+def speak_text(text: str):
+    """Speak text via Google TTS (preferred) or Windows System.Speech (fallback).
+    Deduplicates identical phrases within the session."""
     global _spoken_hashes
     clean = text.strip()
     if not clean:
         return
-    # Deduplication: skip if this exact phrase was already spoken
-    h = hashlib.md5(clean.lower().encode('utf-8')).hexdigest()
+
+    # Dedup: skip if already spoken this session
+    h = hashlib.md5(clean.lower().encode()).hexdigest()
     if h in _spoken_hashes:
         print(f"[Daemon] Skipping duplicate: {clean}", flush=True)
         return
     if len(_spoken_hashes) > 200:
-        _spoken_hashes.clear()  # periodic reset to avoid unbounded growth
+        _spoken_hashes.clear()
     _spoken_hashes.add(h)
 
     print(f"[Daemon] Speaking: {clean}", flush=True)
@@ -154,7 +252,7 @@ def speak_text(text):
     if audio:
         play_audio(audio)
     else:
-        # Fallback: Windows System.Speech (PowerShell) — works offline, no key required
+        # Fallback: Windows System.Speech via hidden PowerShell
         try:
             safe = clean.replace("'", "").replace('"', "").replace("\n", " ")
             ps_cmd = (
@@ -169,52 +267,53 @@ def speak_text(text):
                 stderr=subprocess.DEVNULL,
                 creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0)
             )
-        except Exception as ps_err:
-            print(f"[TTS Fallback Error] {ps_err}", flush=True)
+        except Exception as e:
+            print(f"[TTS Fallback Error] {e}", flush=True)
 
-
-# ── Send to backend AI ─────────────────────────────────────────────────
-def query_ai(transcript):
+# ── AI query ─────────────────────────────────────────────────────────────
+def query_ai(transcript: str) -> str:
     if not backend_url:
-        print("[AI] No backend URL configured.", flush=True)
         return "Chronos backend not configured."
-    if not user_id:
-        print("[AI] No user ID — sending as anonymous.", flush=True)
     try:
-        body = json.dumps({
-            "message": transcript,
-            "history": []
-        }).encode('utf-8')
-        headers = {
-            'Content-Type': 'application/json',
-            'X-User-Id': user_id or 'anonymous'
-        }
-        req = urllib.request.Request(f"{backend_url}/api/ai/chat", data=body,
-                                     headers=headers, method='POST')
+        body = json.dumps({"message": transcript, "history": []}).encode()
+        headers = {'Content-Type': 'application/json', 'X-User-Id': user_id or 'anonymous'}
+        req = urllib.request.Request(f"{backend_url}/api/ai/chat",
+                                     data=body, headers=headers, method='POST')
         with urllib.request.urlopen(req, timeout=20) as res:
             data = json.loads(res.read())
-        return data.get('response', 'No response from AI.')
+        return data.get('response', data.get('content', 'No response.'))
     except Exception as e:
         print(f"[AI Error] {e}", flush=True)
-        return f"Error contacting Chronos AI: {e}"
+        return f"Error: {e}"
 
-
-# ── Hotkey handler ────────────────────────────────────────────────────
-_hotkey_listener = None
-
+# ── Hotkey handler ────────────────────────────────────────────────────────
 def on_activate():
+    """Alt+C pressed: if speaking → interrupt; if recording → ignore; else → listen."""
     global is_recording
+    
+    # If currently speaking, interrupt immediately
+    if is_speaking:
+        print("[Hotkey] Interrupting speech.", flush=True)
+        interrupt_speech()
+        _set_tray_status("Interrupted")
+        return
+
     with recording_lock:
         if is_recording:
-            return
+            return  # already recording — ignore double press
         is_recording = True
+
+    _set_tray_status("Listening...")
+    _set_tray_status("Listening")
     try:
         speak_text("Listening")
         audio = record_audio()
         print("[Mic] Transcribing...", flush=True)
+        _set_tray_status("Thinking")
         transcript = google_stt(audio)
         if not transcript:
             print("[Mic] No speech detected.", flush=True)
+            _set_tray_status("Connected")
             return
         print(f"[User] {transcript}", flush=True)
         response = query_ai(transcript)
@@ -223,47 +322,35 @@ def on_activate():
     finally:
         with recording_lock:
             is_recording = False
-
+        _set_tray_status("Connected")
 
 def setup_hotkey():
-    global _hotkey_listener
-    from pynput import keyboard
     try:
-        from pynput.keyboard import Key, Listener
-        COMBINATION = {keyboard.Key.alt, keyboard.KeyCode.from_char('c')}
-        current = set()
+        from pynput import keyboard
+        COMBO = {keyboard.Key.alt, keyboard.KeyCode.from_char('c')}
+        current: set = set()
 
         def on_press(key):
-            if key in COMBINATION:
-                current.add(key)
-                if all(k in current for k in COMBINATION):
-                    threading.Thread(target=on_activate, daemon=True).start()
-            if key == keyboard.Key.alt:
-                current.add(key)
+            current.add(key)
+            if all(k in current for k in COMBO):
+                threading.Thread(target=on_activate, daemon=True).start()
 
         def on_release(key):
-            try:
-                current.discard(key)
-            except KeyError:
-                pass
-            if key == keyboard.Key.alt:
-                current.discard(key)
+            current.discard(key)
 
-        listener = Listener(on_press=on_press, on_release=on_release)
+        listener = keyboard.Listener(on_press=on_press, on_release=on_release)
         listener.daemon = True
         listener.start()
-        _hotkey_listener = listener
-        print("[Daemon] Alt+C hotkey registered (global).", flush=True)
+        print("[Daemon] Alt+C hotkey registered.", flush=True)
     except Exception as e:
-        print(f"[Hotkey Error] Could not register global hotkey: {e}", flush=True)
-        print("[Daemon] Falling back: voice will only respond to browser SSE.", flush=True)
+        print(f"[Hotkey Error] {e}", flush=True)
 
-
-# ── SSE listener ───────────────────────────────────────────────────────
-def sse_listener(url):
+# ── SSE listener ──────────────────────────────────────────────────────────
+def sse_listener(url: str):
     while True:
         try:
             print(f"[SSE] Connecting to {url}/api/voice/events", flush=True)
+            _set_tray_status("Connected")
             req = urllib.request.Request(f"{url}/api/voice/events")
             req.add_header('X-User-Id', user_id or 'anonymous')
             with urllib.request.urlopen(req, timeout=600) as res:
@@ -274,17 +361,17 @@ def sse_listener(url):
                             data = json.loads(line_str[5:].strip())
                             if data.get('text') and data.get('speak') is not False:
                                 speak_text(data['text'])
-                        except Exception as e:
-                            print(f"[SSE] Parse error: {e}", flush=True)
+                        except Exception as parse_err:
+                            print(f"[SSE] Parse error: {parse_err}", flush=True)
         except Exception as e:
             print(f"[SSE] Disconnected: {e}, reconnecting in 5s...", flush=True)
+            _set_tray_status("Waiting")
             time.sleep(5)
 
-
-# ── Local HTTP server ──────────────────────────────────────────────────
+# ── Local HTTP server (heartbeat + register) ──────────────────────────────
 class DaemonHandler(BaseHTTPRequestHandler):
     def log_message(self, fmt, *args):
-        pass
+        pass  # suppress request logs
 
     def end_headers(self):
         self.send_header('Access-Control-Allow-Origin', '*')
@@ -307,14 +394,15 @@ class DaemonHandler(BaseHTTPRequestHandler):
                 'service': 'chronos-voice-daemon',
                 'hotkey': 'Alt+C',
                 'apiKey': bool(google_api_key),
-                'userId': bool(user_id)
-            }).encode('utf-8'))
+                'userId': bool(user_id),
+                'isSpeaking': is_speaking,
+            }).encode())
         elif self.path == '/heartbeat':
             last_heartbeat = time.time()
             self.send_response(200)
             self.send_header('Content-Type', 'application/json')
             self.end_headers()
-            self.wfile.write(json.dumps({'status': 'acknowledged'}).encode('utf-8'))
+            self.wfile.write(json.dumps({'status': 'acknowledged'}).encode())
         else:
             self.send_response(404)
             self.end_headers()
@@ -323,35 +411,43 @@ class DaemonHandler(BaseHTTPRequestHandler):
         global user_id, google_api_key, backend_url
         content_len = int(self.headers.get('Content-Length', 0))
         body = self.rfile.read(content_len) if content_len else b'{}'
-        data = json.loads(body) if body else {}
+        try:
+            data = json.loads(body)
+        except Exception:
+            data = {}
+
         if self.path == '/register':
             uid = data.get('userId', '')
             if uid:
                 user_id = uid
                 print(f"[Daemon] Registered user: {user_id}", flush=True)
-                self.send_response(200)
-                self.send_header('Content-Type', 'application/json')
-                self.end_headers()
-                self.wfile.write(json.dumps({'status': 'registered'}).encode('utf-8'))
-                return
-        self.send_response(404)
-        self.end_headers()
-
+            self.send_response(200)
+            self.send_header('Content-Type', 'application/json')
+            self.end_headers()
+            self.wfile.write(json.dumps({'status': 'registered'}).encode())
+        elif self.path == '/interrupt':
+            # Called by browser to stop current speech
+            interrupt_speech()
+            self.send_response(200)
+            self.send_header('Content-Type', 'application/json')
+            self.end_headers()
+            self.wfile.write(json.dumps({'status': 'interrupted'}).encode())
+        else:
+            self.send_response(404)
+            self.end_headers()
 
 def run_local_server():
-    port = 43210
     for attempt in range(5):
         try:
-            server = HTTPServer(('127.0.0.1', port + attempt), DaemonHandler)
-            print(f"[Daemon] Local HTTP server on 127.0.0.1:{port + attempt}", flush=True)
+            server = HTTPServer(('127.0.0.1', DAEMON_PORT + attempt), DaemonHandler)
+            print(f"[Daemon] HTTP server on 127.0.0.1:{DAEMON_PORT + attempt}", flush=True)
             server.serve_forever()
             return
         except OSError:
             continue
-    print("[Daemon] Could not open local HTTP server port.", flush=True)
+    print("[Daemon] Could not bind to any port.", flush=True)
 
-
-# ── Bootstrap ──────────────────────────────────────────────────────────
+# ── Bootstrap config fetch ────────────────────────────────────────────────
 def fetch_config():
     global google_api_key, backend_url, user_id
     for url in API_URLS:
@@ -360,65 +456,115 @@ def fetch_config():
             req.add_header('X-User-Id', user_id or 'anonymous')
             with urllib.request.urlopen(req, timeout=5) as res:
                 data = json.loads(res.read())
-                google_api_key = data.get('googleApiKey', google_api_key)
-                backend_url = data.get('backendUrl', url)
-                if data.get('userId'):
-                    user_id = data['userId']
-                print(f"[Config] Fetched from {url}", flush=True)
-                print(f"[Config] API key set: {bool(google_api_key)}", flush=True)
-                print(f"[Config] Backend: {backend_url}", flush=True)
-                return True
+            google_api_key = data.get('googleApiKey', google_api_key)
+            backend_url    = data.get('backendUrl', url)
+            if data.get('userId'):
+                user_id = data['userId']
+            print(f"[Config] Fetched from {url} | key={'yes' if google_api_key else 'no'}", flush=True)
+            return True
         except Exception as e:
             print(f"[Config] {url} — {e}", flush=True)
-    print("[Config] Could not reach any backend. Running in offline mode.", flush=True)
+    print("[Config] Offline mode.", flush=True)
     return False
 
-
-def heartbeat_monitor():
-    if standalone:
-        return
-    time.sleep(15)
-    while True:
-        if time.time() - last_heartbeat > HEARTBEAT_TIMEOUT:
-            print(f"[Daemon] No heartbeat for {HEARTBEAT_TIMEOUT}s. Shutting down.", flush=True)
-            speak_text("Chronos voice bridge closed")
-            time.sleep(2)
-            os._exit(0)
-        time.sleep(2)
-
-
+# ── Ping loop ─────────────────────────────────────────────────────────────
 def ping_loop():
     while True:
         for url in API_URLS:
             try:
-                req = urllib.request.Request(f"{url}/api/voice/ping",
-                                             data=b'{}',
-                                             headers={'Content-Type': 'application/json'})
-                with urllib.request.urlopen(req, timeout=3):
-                    pass
+                req = urllib.request.Request(
+                    f"{url}/api/voice/ping",
+                    data=b'{}',
+                    headers={'Content-Type': 'application/json'}
+                )
+                urllib.request.urlopen(req, timeout=3)
             except Exception:
                 pass
         time.sleep(10)
 
+# ── Heartbeat monitor ─────────────────────────────────────────────────────
+def heartbeat_monitor():
+    """Kill daemon when browser closes (no heartbeat for HEARTBEAT_TIMEOUT + 5s)."""
+    if standalone:
+        return
+    time.sleep(15)  # grace period on startup
+    while True:
+        elapsed = time.time() - last_heartbeat
+        if elapsed > HEARTBEAT_TIMEOUT:
+            print(f"[Daemon] No heartbeat for {elapsed:.0f}s. Waiting 5s grace...", flush=True)
+            _set_tray_status("Disconnected")
+            time.sleep(5)
+            # Re-check — a reconnect may have arrived during the grace period
+            if time.time() - last_heartbeat > HEARTBEAT_TIMEOUT:
+                print("[Daemon] Still no heartbeat. Shutting down.", flush=True)
+                _exit_daemon()
+        time.sleep(2)
 
+# ── Main ──────────────────────────────────────────────────────────────────
 if __name__ == '__main__':
+    # Redirect all stdout/stderr to log file to stay completely silent
+    log_dir = Path(os.environ.get('LOCALAPPDATA', Path.home())) / 'ChronosVoice'
+    log_dir.mkdir(parents=True, exist_ok=True)
+    log_path = log_dir / 'daemon.log'
+    _log_file = open(log_path, 'a', encoding='utf-8', buffering=1)
+    if not standalone:
+        sys.stdout = _log_file
+        sys.stderr = _log_file
+
     print("=" * 50, flush=True)
     print("  CHRONOS VOICE DAEMON", flush=True)
-    print(f"  {'Standalone mode' if standalone else 'Browser companion mode'}", flush=True)
-    print("  Hotkey: Alt+C (system-wide)", flush=True)
+    print(f"  {'Standalone' if standalone else 'Browser companion'} mode", flush=True)
+    print("  Alt+C: voice query  |  Alt+C during speech: interrupt", flush=True)
     print("=" * 50, flush=True)
 
     fetch_config()
 
-    speak_text("Chronos voice daemon online")
-
+    # Start background threads
     threading.Thread(target=ping_loop, daemon=True).start()
-
+    threading.Thread(target=heartbeat_monitor, daemon=True).start()
     for url in API_URLS:
         threading.Thread(target=sse_listener, args=(url,), daemon=True).start()
-
-    threading.Thread(target=heartbeat_monitor, daemon=True).start()
+    threading.Thread(target=run_local_server, daemon=True).start()
 
     setup_hotkey()
 
-    run_local_server()
+    # Build system tray
+    try:
+        import pystray
+        from PIL import Image
+
+        icon_img = _build_icon()
+        if icon_img is None:
+            # Absolute minimal fallback
+            icon_img = Image.new('RGB', (32, 32), color=(100, 30, 200))
+
+        menu = pystray.Menu(
+            pystray.MenuItem(lambda _: f"⬤  {_tray_status}", None, enabled=False),
+            pystray.Menu.SEPARATOR,
+            pystray.MenuItem("Open Logs",        lambda: _open_logs()),
+            pystray.MenuItem("Restart Voice",    lambda: _restart_voice()),
+            pystray.Menu.SEPARATOR,
+            pystray.MenuItem("Exit Chronos Voice", lambda: _exit_daemon()),
+        )
+
+        _tray_icon = pystray.Icon(
+            name="chronos_voice",
+            icon=icon_img,
+            title="Chronos Voice — Starting...",
+            menu=menu,
+        )
+
+        _set_tray_status("Running")
+        print("[Daemon] Tray icon active.", flush=True)
+        _tray_icon.run()  # blocks until icon.stop() is called
+
+    except ImportError:
+        print("[Daemon] pystray/Pillow not installed. Running headless.", flush=True)
+        _set_tray_status("Running (headless)")
+        # Headless: just block the main thread
+        while True:
+            time.sleep(60)
+    except Exception as tray_err:
+        print(f"[Daemon] Tray error: {tray_err}. Running headless.", flush=True)
+        while True:
+            time.sleep(60)

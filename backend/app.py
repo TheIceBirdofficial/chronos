@@ -128,6 +128,38 @@ import queue
 import hashlib
 import threading
 import time
+
+def parse_iso_to_local_naive(iso_str):
+    if not iso_str:
+        return datetime.datetime.now()
+    try:
+        iso_clean = iso_str.replace('Z', '+00:00')
+        dt = datetime.datetime.fromisoformat(iso_clean)
+        if dt.tzinfo is not None:
+            # Convert to local system timezone (astimezone(None))
+            dt = dt.astimezone(None)
+            dt = dt.replace(tzinfo=None)
+        return dt
+    except Exception:
+        # Fallback to naive stripping of Z/offsets
+        try:
+            t_parts = iso_str.split('T')
+            if len(t_parts) == 2:
+                time_part = t_parts[1].replace('Z', '')
+                if '+' in time_part:
+                    time_part = time_part.split('+')[0]
+                elif '-' in time_part:
+                    # check if the minus is the timezone offset
+                    # e.g., 12:00:00-05:00 vs 12:00:00.123
+                    parts = time_part.split('-')
+                    if len(parts) > 1 and len(parts[-1]) == 5 and ':' in parts[-1]:
+                        time_part = '-'.join(parts[:-1])
+                dt = datetime.datetime.fromisoformat(f"{t_parts[0]}T{time_part}")
+                return dt
+        except Exception:
+            pass
+        return datetime.datetime.now()
+
 from memory_engine import (
     init_memory_table, get_memory, upsert_memory, delete_memory,
     get_timeline, ingest_timeline_event, get_memory_summary,
@@ -269,12 +301,8 @@ def evaluate_task_state_voice_events(prev, current):
             due_str = current.get('due')
             hours_ahead = 0
             if due_str:
-                try:
-                    iso_clean = due_str.replace('Z', '+00:00')
-                    due_dt = datetime.datetime.fromisoformat(iso_clean).replace(tzinfo=None)
-                    hours_ahead = int((due_dt - datetime.datetime.now()).total_seconds() / 3600.0)
-                except Exception:
-                    pass
+                due_dt = parse_iso_to_local_naive(due_str)
+                hours_ahead = int((due_dt - datetime.datetime.now()).total_seconds() / 3600.0)
             hours_ahead = max(0, hours_ahead)
             stats = load_interventions()
             total_interventions = stats['totals'].get('interventions', 1)
@@ -1320,24 +1348,20 @@ def get_ai_config_from_db():
     return {'provider': 'gemini', 'apiUrl': 'https://generativelanguage.googleapis.com/v1beta', 'apiKey': '', 'model': 'gemini-1.5-flash'}
 
 
-def generate_dynamic_timeline(title, due_str, twin_profile="", ai_config=None, user_id=None):
+def generate_dynamic_timeline(title, due_str, twin_profile="", ai_config=None, user_id=None, estimated_hours=None):
     """
-    Generates a dynamic timeline based on the title, due date, and user profile.
-    Uses the configured AI supplier when available, falls back to rule-based computation.
-    AI decides number of phases, phase names, phase order, subtasks, and estimated duration.
+    Generates a time-pressure-aware timeline. Urgency tier is computed from
+    actual remaining hours and available work capacity, then passed to the AI
+    (or rule-based fallback) so generated phases reflect real deadline proximity.
     """
+    import math as _math
+
     now = datetime.datetime.now()
     due = now + datetime.timedelta(hours=4)
-    if due_str:
-        try:
-            iso_clean = due_str.replace('Z', '+00:00')
-            due = datetime.datetime.fromisoformat(iso_clean).replace(tzinfo=None)
-        except Exception:
-            pass
-            
+    due = parse_iso_to_local_naive(due_str)
+
     total_hours = (due - now).total_seconds() / 3600.0
-    if total_hours <= 0:
-        total_hours = 4.0
+    est_h = float(estimated_hours) if estimated_hours else max(1.0, total_hours * 0.4)
 
     def format_time_ref(dt):
         diff_days = (dt.date() - now.date()).days
@@ -1347,37 +1371,86 @@ def generate_dynamic_timeline(title, due_str, twin_profile="", ai_config=None, u
         elif diff_days == 1:
             return f"Tomorrow, {time_part}"
         else:
-            return f"{dt.strftime('%d %b')}, {time_part}"
+            return f"{dt.strftime('%a %d %b')}, {time_part}"
 
-    # Load sleep & procrastination settings from SQLite database
+    # Load sleep & procrastination settings
     sleep_start = 23
     sleep_end = 7
     procrastination_rating = 8.0
     try:
         conn = get_db_conn()
         cursor = conn.cursor()
-        cursor.execute("SELECT sleepStart, sleepEnd, procrastinationRating FROM settings WHERE id = 'active_operator' AND user_id = ?", (user_id,))
+        cursor.execute(
+            "SELECT sleepStart, sleepEnd, procrastinationRating FROM settings WHERE id = 'active_operator' AND user_id = ?",
+            (user_id,)
+        )
         row = cursor.fetchone()
         if row:
             sleep_start = int(row[0])
-            sleep_end = int(row[1])
+            sleep_end   = int(row[1])
             procrastination_rating = float(row[2])
         conn.close()
     except Exception:
         pass
 
+    # Compute available work hours (excl. sleep/eating/misc)
+    sleep_h  = get_sleep_hours_between(now, due, sleep_start, sleep_end) if total_hours > 0 else 0
+    avail_h  = max(0.0, total_hours - sleep_h - 2.0*(total_hours/24.0) - 1.5*(total_hours/24.0))
+    efficiency = max(0.35, 0.90 - (procrastination_rating - 1) * 0.055)
+    effective_h = avail_h * efficiency
+    feasibility = (effective_h / est_h) if est_h > 0 else 0.0
+
+    # 5-Tier urgency system
+    if total_hours <= 0:
+        urgency_tier = "RECOVERY"
+        urgency_desc = "deadline has passed — damage control mode"
+        phase_count  = 2
+    elif total_hours <= 4:
+        urgency_tier = "CRITICAL"
+        urgency_desc = f"only {total_hours:.1f}h left — emergency sprint required"
+        phase_count  = 2
+    elif total_hours <= 24:
+        urgency_tier = "HIGH"
+        urgency_desc = "deadline is today — compressed single-day schedule"
+        phase_count  = 3
+    elif total_hours <= 72:
+        urgency_tier = "MODERATE"
+        urgency_desc = "2–3 days remaining — structured execution window"
+        phase_count  = 4
+    else:
+        urgency_tier = "RELAXED"
+        urgency_desc = f"{total_hours/24:.0f} days remaining — deliberate paced schedule"
+        phase_count  = 5
+
+    feasibility_note = (
+        "SURPLUS: ample capacity" if feasibility >= 1.5
+        else "TIGHT: no slack for delays" if feasibility >= 1.0
+        else f"DEFICIT: {round(est_h - effective_h, 1)}h shortfall — sleep sacrifice or scope reduction needed"
+    )
+
     # Try user's configured AI supplier first
     if ai_config and ai_config.get('apiKey'):
         try:
             prompt = (
-                f"You are a master timeline partitioner. Current time is {now.strftime('%A, %d %b at %I:%M %p')}. "
-                f"Generate a task breakdown timeline for '{title}' due at {due.strftime('%A, %d %b at %I:%M %p')} ({total_hours:.1f} hours from now). "
-                f"User sleep schedule: {sleep_start}:00 to {sleep_end}:00. Procrastination factor: {procrastination_rating}/10. "
-                f"User profile: {twin_profile}. "
-                f"Decide the optimal number of phases (2-5) based on complexity and time available. "
-                f"Partition time accurately, avoiding sleep windows and placing work at productive hours. Phase 1 should start early. "
-                f"Respond with ONLY a raw JSON array of objects, each having keys: 'title' (actionable subtask) and 'scheduledTime' (formatted as 'Today at 8:00 PM'). "
-                f"Return the appropriate number of phases based on the task's scope and due time."
+                f"You are Chronos, a tactical AI deadline defense system. Current time: {now.strftime('%A, %d %b %Y at %I:%M %p')}.\n"
+                f"Generate a time-pressure-aware task breakdown for: '{title}'\n"
+                f"Deadline: {due.strftime('%A, %d %b at %I:%M %p')} ({total_hours:.1f}h from now)\n"
+                f"Urgency Tier: {urgency_tier} — {urgency_desc}\n"
+                f"Estimated effort: {est_h:.1f}h | Effective capacity: {effective_h:.1f}h | Feasibility: {feasibility_note}\n"
+                f"Sleep schedule: {sleep_start}:00–{sleep_end}:00 | Procrastination factor: {procrastination_rating}/10\n"
+                f"Twin profile: {twin_profile}\n\n"
+                f"Generate EXACTLY {phase_count} phases.\n"
+                f"Tone rules by urgency tier:\n"
+                f"  RELAXED: optimistic, deliberate, quality-focused phrasing\n"
+                f"  MODERATE: structured, business-like, balanced\n"
+                f"  HIGH: urgent, focused, single-day sprint mentality\n"
+                f"  CRITICAL: emergency framing, acknowledge time pressure explicitly, no fluff\n"
+                f"  RECOVERY: post-deadline damage control, constructive tone, partial credit focus\n"
+                f"Rules: Never schedule work during sleep ({sleep_start}:00–{sleep_end}:00). "
+                f"Each scheduledTime must be a realistic clock time given today's date and sleep windows. "
+                f"Phase 1 should start within 30 minutes of now if CRITICAL or HIGH.\n"
+                f"Respond ONLY with raw JSON array: "
+                f'[{{"title": "...", "scheduledTime": "Today at 8:00 PM"}}]'
             )
             reply = query_ai_direct(
                 ai_config.get('provider', 'gemini'),
@@ -1390,62 +1463,74 @@ def generate_dynamic_timeline(title, due_str, twin_profile="", ai_config=None, u
             if reply:
                 content = reply.strip()
                 if '```' in content:
-                    parts = content.split('```')
-                    for part in parts:
-                        stripped = part.strip()
-                        if stripped.startswith('json'):
-                            stripped = stripped[4:].strip()
+                    for part in content.split('```'):
+                        stripped = part.strip().lstrip('json').strip()
                         if stripped.startswith('['):
                             content = stripped
                             break
                 phases = json.loads(content)
                 if isinstance(phases, list) and len(phases) >= 2:
-                    timeline = []
-                    phase_count = len(phases)
-                    for i, p in enumerate(phases):
-                        timeline.append({
+                    return [
+                        {
                             "id": f"m{i+1}",
                             "title": p.get("title", f"Phase {i+1}"),
                             "status": "pending",
                             "scheduledTime": p.get("scheduledTime", "")
-                        })
-                    return timeline
+                        }
+                        for i, p in enumerate(phases)
+                    ]
         except Exception as e:
-            print(f"[Timeline Gen] AI supplier generation failed: {e}", flush=True)
-        
-    # Intelligent fallback based on time available
-    if total_hours < 6:
-        # Quick task: 2 phases
-        p1_time = now + datetime.timedelta(hours=total_hours * 0.4)
-        p2_time = now + datetime.timedelta(hours=total_hours * 0.85)
+            print(f"[Timeline Gen] AI failed: {e}", flush=True)
+
+    # ── Rule-based fallback with 5-tier urgency ───────────────────────────
+    def phase_time(fraction):
+        dt = now + datetime.timedelta(hours=max(0, total_hours) * fraction)
+        # Skip into next valid work window if in sleep period
+        if sleep_start > sleep_end:  # e.g. 23:00 – 07:00
+            in_sleep = dt.hour >= sleep_start or dt.hour < sleep_end
+        else:
+            in_sleep = sleep_start <= dt.hour < sleep_end
+        if in_sleep:
+            # Advance to next wake-up time
+            wake_dt = dt.replace(hour=sleep_end, minute=0, second=0, microsecond=0)
+            if wake_dt <= dt:
+                wake_dt += datetime.timedelta(days=1)
+            dt = wake_dt
+        return format_time_ref(dt)
+
+    if urgency_tier == "RECOVERY":
         return [
-            {"id": "m1", "title": f"Complete: '{title}'", "status": "pending", "scheduledTime": format_time_ref(p1_time)},
-            {"id": "m2", "title": f"Review & submit '{title}'", "status": "pending", "scheduledTime": format_time_ref(p2_time)}
+            {"id": "m1", "title": f"Emergency triage: assess what's salvageable from '{title}'", "status": "pending", "scheduledTime": phase_time(0.1)},
+            {"id": "m2", "title": f"Late submission or partial credit: finalise '{title}'",    "status": "pending", "scheduledTime": phase_time(0.6)},
         ]
-    elif total_hours < 24:
-        # Same day task: 3 phases
-        p1_time = now + datetime.timedelta(hours=total_hours * 0.25)
-        p2_time = now + datetime.timedelta(hours=total_hours * 0.6)
-        p3_time = now + datetime.timedelta(hours=total_hours * 0.9)
+    elif urgency_tier == "CRITICAL":
         return [
-            {"id": "m1", "title": f"Initiate: Research & structure for '{title}'", "status": "pending", "scheduledTime": format_time_ref(p1_time)},
-            {"id": "m2", "title": f"Execute: Build core for '{title}'", "status": "pending", "scheduledTime": format_time_ref(p2_time)},
-            {"id": "m3", "title": f"Finalize: Review & submit '{title}'", "status": "pending", "scheduledTime": format_time_ref(p3_time)}
+            {"id": "m1", "title": f"URGENT — Begin '{title}' immediately (core work only)", "status": "pending", "scheduledTime": phase_time(0.05)},
+            {"id": "m2", "title": f"URGENT — Final wrap-up and submission of '{title}'",     "status": "pending", "scheduledTime": phase_time(0.75)},
         ]
-    else:
-        # Multi-day task: 5 phases with milestones
-        p1_time = now + datetime.timedelta(hours=total_hours * 0.15)
-        p2_time = now + datetime.timedelta(hours=total_hours * 0.35)
-        p3_time = now + datetime.timedelta(hours=total_hours * 0.55)
-        p4_time = now + datetime.timedelta(hours=total_hours * 0.75)
-        p5_time = now + datetime.timedelta(hours=total_hours * 0.95)
+    elif urgency_tier == "HIGH":
         return [
-            {"id": "m1", "title": f"Plan: Define scope & requirements for '{title}'", "status": "pending", "scheduledTime": format_time_ref(p1_time)},
-            {"id": "m2", "title": f"Research: Gather resources & references for '{title}'", "status": "pending", "scheduledTime": format_time_ref(p2_time)},
-            {"id": "m3", "title": f"Build: Core implementation of '{title}'", "status": "pending", "scheduledTime": format_time_ref(p3_time)},
-            {"id": "m4", "title": f"Test: Verify & refine '{title}'", "status": "pending", "scheduledTime": format_time_ref(p4_time)},
-            {"id": "m5", "title": f"Deploy: Final review & submit '{title}'", "status": "pending", "scheduledTime": format_time_ref(p5_time)}
+            {"id": "m1", "title": f"Start now: foundation work for '{title}'",  "status": "pending", "scheduledTime": phase_time(0.1)},
+            {"id": "m2", "title": f"Core execution sprint: '{title}'",          "status": "pending", "scheduledTime": phase_time(0.5)},
+            {"id": "m3", "title": f"Final review and submission: '{title}'",    "status": "pending", "scheduledTime": phase_time(0.85)},
         ]
+    elif urgency_tier == "MODERATE":
+        return [
+            {"id": "m1", "title": f"Define scope and plan for '{title}'",    "status": "pending", "scheduledTime": phase_time(0.1)},
+            {"id": "m2", "title": f"Research and gather resources",           "status": "pending", "scheduledTime": phase_time(0.35)},
+            {"id": "m3", "title": f"Core execution: '{title}'",               "status": "pending", "scheduledTime": phase_time(0.6)},
+            {"id": "m4", "title": f"Review, refine and submit",               "status": "pending", "scheduledTime": phase_time(0.88)},
+        ]
+    else:  # RELAXED
+        return [
+            {"id": "m1", "title": f"Scope and plan: '{title}'",           "status": "pending", "scheduledTime": phase_time(0.08)},
+            {"id": "m2", "title": f"Deep research and preparation",        "status": "pending", "scheduledTime": phase_time(0.28)},
+            {"id": "m3", "title": f"Core implementation: '{title}'",       "status": "pending", "scheduledTime": phase_time(0.52)},
+            {"id": "m4", "title": f"Testing and quality review",           "status": "pending", "scheduledTime": phase_time(0.72)},
+            {"id": "m5", "title": f"Final polish and submission",          "status": "pending", "scheduledTime": phase_time(0.92)},
+        ]
+
+
 
 
 AI_EVALUATION_CACHE = {}
@@ -1494,12 +1579,8 @@ def run_autonomous_agent_decisions(task, level, survival_score, sleep_start, sle
     due_str = task.get('due')
     real_hours_left = 4.0
     if due_str:
-        try:
-            iso_clean = due_str.replace('Z', '+00:00')
-            due_dt = datetime.datetime.fromisoformat(iso_clean).replace(tzinfo=None)
-            real_hours_left = max(0.1, (due_dt - now).total_seconds() / 3600.0)
-        except Exception:
-            pass
+        due_dt = parse_iso_to_local_naive(due_str)
+        real_hours_left = max(0.1, (due_dt - now).total_seconds() / 3600.0)
 
     estimated_hours = float(task.get('estimatedHours', 2))
     delay_count = int(task.get('delayCount', 0))
@@ -1693,11 +1774,7 @@ def evaluate_task(task, twin_profile="", is_pulse=False, user_id=None):
         return task
         
     now = datetime.datetime.now()
-    try:
-        iso_clean = due_str.replace('Z', '+00:00')
-        due = datetime.datetime.fromisoformat(iso_clean).replace(tzinfo=None)
-    except Exception:
-        due = datetime.datetime.now() + datetime.timedelta(hours=4)
+    due = parse_iso_to_local_naive(due_str)
     
     # Calculate real time remaining in hours
     real_time_diff = due - now
@@ -1727,37 +1804,72 @@ def evaluate_task(task, twin_profile="", is_pulse=False, user_id=None):
     except Exception as e:
         print(f"[SQLite load settings error] {e}")
             
-    # Subtract sleep hours (non-work hours), eating hours, and misc overheads to get highly accurate available hours
-    sleep_hours = get_sleep_hours_between(now, due, sleep_start, sleep_end)
-    eating_overhead = 2.0 * (real_hours_left / 24.0)
-    misc_overhead = 1.5 * (real_hours_left / 24.0)
-    work_hours_left = max(0.1, real_hours_left - sleep_hours - eating_overhead - misc_overhead)
-    
-    # Proactive Outcome Prediction math:
-    # Buffer in hours before deadline that the user typically starts the task
-    predicted_start_lead_hours = round(max(1.0, (10.0 - procrastination_rating) * 1.5), 1)
-    
-    # Calculate historical delay count penalty
-    delay_count = int(task.get('delayCount', 0))
-    delay_penalty = delay_count * 8
-    
-    # Calculate work remaining and margin
-    margin = work_hours_left / estimated_hours
-    
-    # Defaults and fallback values
-    pred_risk = int(10 + delay_penalty)
-    if margin < 1.3:
-        pred_risk += 25
-    pred_risk = max(5, min(95, pred_risk))
-    survival_score = 100 - pred_risk
+    # ── Data-driven survival probability ──────────────────────────────────
+    # Step 1: Available work hours (excl. sleep, eating overhead, misc overhead)
+    sleep_hours      = get_sleep_hours_between(now, due, sleep_start, sleep_end)
+    eating_overhead  = 2.0 * (real_hours_left / 24.0)
+    misc_overhead    = 1.5 * (real_hours_left / 24.0)
+    work_hours_left  = max(0.0, real_hours_left - sleep_hours - eating_overhead - misc_overhead)
+
+    # Step 2: Procrastination erosion — user won't use 100% of available hours.
+    #   procrastination_rating 1 = very disciplined (90% efficiency)
+    #   procrastination_rating 10 = extremely prone (40% efficiency)
+    efficiency = max(0.35, 0.90 - (procrastination_rating - 1) * 0.055)
+    effective_hours = work_hours_left * efficiency
+
+    # Step 3: Feasibility ratio — how much capacity vs. how much work is needed
+    #   ratio >= 2.0 → very comfortable (score near 95)
+    #   ratio == 1.0 → exactly enough (score ~55; procrastination risk)
+    #   ratio  < 1.0 → physically impossible without skipping sleep
+    #   ratio <= 0   → already impossible
+    if estimated_hours <= 0:
+        estimated_hours = 0.5
+    feasibility_ratio = effective_hours / estimated_hours
+
+    # Step 4: Base survival score from capacity curve (sigmoid-like mapping)
+    if feasibility_ratio <= 0:
+        base_score = 1
+    elif feasibility_ratio >= 3.0:
+        base_score = 96
+    else:
+        # Smooth curve: 0→1, 0.5→25, 1.0→55, 1.5→72, 2.0→84, 2.5→90, 3.0→96
+        import math
+        base_score = int(96 * (1 - math.exp(-1.4 * feasibility_ratio)))
+        base_score = max(1, min(96, base_score))
+
+    # Step 5: Progress credit — completed checkpoints reduce remaining effort
+    try:
+        cat_raw = task.get('category', '{}') or '{}'
+        cat_obj = json.loads(cat_raw) if isinstance(cat_raw, str) else (cat_raw or {})
+        completed_cps = len(cat_obj.get('completedCheckpoints', []))
+        total_cps = sum(
+            len(m.get('checkpoints', [])) if isinstance(m, dict) else 0
+            for m in (task.get('timeline') or [])
+        )
+        progress_fraction = (completed_cps / total_cps) if total_cps > 0 else 0.0
+    except Exception:
+        progress_fraction = 0.0
+    progress_bonus = int(progress_fraction * 12)  # up to +12 pts for full completion
+
+    # Step 6: Historical delay penalty
+    delay_count   = int(task.get('delayCount', 0))
+    delay_penalty = min(30, delay_count * 8)
+
+    # Step 7: Importance weight (high-importance tasks feel more precarious)
+    importance_penalty = {'high': 4, 'medium': 0, 'low': -3}.get(importance, 0)
+
+    # Step 8: Compose final score
+    survival_score = base_score + progress_bonus - delay_penalty - importance_penalty
     survival_score = max(1, min(98, survival_score))
-    
+
     no_return_offset_hours = estimated_hours
+    predicted_start_lead_hours = round(max(1.0, (10.0 - procrastination_rating) * 1.5), 1)
     cognitive_observations = [
-        f"Effort requirement: {estimated_hours} hours. Active productive window: {round(work_hours_left, 1)}h (excl. sleep, eating, misc overheads).",
-        f"Operator Twin procrastination factor of {procrastination_rating} is active.",
-        f"Historical delay penalties applied: {delay_penalty}% risk margin offset."
+        f"Capacity check: {round(effective_hours, 1)}h effective (of {round(work_hours_left, 1)}h available at {int(efficiency*100)}% efficiency) vs {estimated_hours}h required.",
+        f"Feasibility ratio: {round(feasibility_ratio, 2)}x. {'Surplus capacity.' if feasibility_ratio >= 1.5 else 'Tight window — no slack.' if feasibility_ratio >= 1.0 else 'DEFICIT — impossible without sleep reduction.'}",
+        f"Adjustments: progress +{progress_bonus}pts, delay history -{delay_penalty}pts, procrastination erosion active ({int((1-efficiency)*100)}% waste)."
     ]
+
     log_message = None
 
     ai_config = None
@@ -1841,6 +1953,32 @@ Respond ONLY with raw JSON. No markdown, no explanation."""
                     }
             except Exception as e:
                 print(f"[evaluate_task] AI evaluation failed: {e}", flush=True)
+
+    # ── Strict Data-Driven Capacity Overrides (Task 5) ────────────────────
+    if completed:
+        survival_score = 100
+    elif real_hours_left <= 0:
+        if task.get('recoveryActive'):
+            # Recovery Protocol is active. Success probability based on recovery progress
+            rec_progress = float(task.get('recoveryProgress') or 0.0)
+            survival_score = max(5, min(95, int(rec_progress)))
+        else:
+            survival_score = 0
+    else:
+        if work_hours_left <= 0:
+            # Sleep schedule/overhead consumed all remaining time
+            survival_score = 1
+        elif estimated_hours > work_hours_left:
+            # Capacity deficit
+            capacity_ratio = work_hours_left / estimated_hours
+            survival_score = max(1, min(45, int(capacity_ratio * 45)))
+        else:
+            # Surplus, but adjust based on capacity boundaries
+            capacity_ratio = work_hours_left / estimated_hours
+            if capacity_ratio < 1.3:
+                survival_score = min(65, survival_score)
+            elif capacity_ratio < 1.6:
+                survival_score = min(80, survival_score)
 
     # 5-Stage Escalations
     if survival_score >= 80:
@@ -1956,11 +2094,7 @@ Respond ONLY with raw JSON. No markdown, no explanation."""
 def generate_fallback_timeline(title, due_str):
     import datetime
     now = datetime.datetime.now()
-    try:
-        iso_clean = due_str.replace('Z', '+00:00')
-        due = datetime.datetime.fromisoformat(iso_clean).replace(tzinfo=None)
-    except Exception:
-        due = now + datetime.timedelta(hours=4)
+    due = parse_iso_to_local_naive(due_str)
         
     diff = due - now
     total_hours = max(0.5, diff.total_seconds() / 3600.0)
@@ -2382,12 +2516,8 @@ def rescue_task(tid):
     # Compute hours remaining
     hours_remaining = 0
     if due_str:
-        try:
-            iso_clean = due_str.replace('Z', '+00:00')
-            due_dt = datetime.datetime.fromisoformat(iso_clean).replace(tzinfo=None)
-            hours_remaining = max(0, (due_dt - now).total_seconds() / 3600.0)
-        except Exception:
-            pass
+        due_dt = parse_iso_to_local_naive(due_str)
+        hours_remaining = max(0.0, (due_dt - now).total_seconds() / 3600.0)
 
     # --- AI-driven recovery checklist & forecast ---
     ai_checklist = None
@@ -2494,8 +2624,7 @@ Respond ONLY with the raw JSON object. No markdown, no explanation."""
     # Point of no return
     if due_str:
         try:
-            iso_clean = due_str.replace('Z', '+00:00')
-            due_dt = datetime.datetime.fromisoformat(iso_clean).replace(tzinfo=None)
+            due_dt = parse_iso_to_local_naive(due_str)
             offset_hours = float(ai_no_return_offset) if ai_no_return_offset else estimated_hours * 1.5
             new_no_return_dt = due_dt - datetime.timedelta(hours=offset_hours)
             diff_days = (new_no_return_dt.date() - now.date()).days
@@ -2732,8 +2861,7 @@ def recovery_status():
     
     if due_str:
         now = datetime.datetime.now()
-        iso_clean = due_str.replace('Z', '+00:00')
-        due = datetime.datetime.fromisoformat(iso_clean).replace(tzinfo=None)
+        due = parse_iso_to_local_naive(due_str)
         real_time_diff = due - now
         real_hours_left = real_time_diff.total_seconds() / 3600.0
         

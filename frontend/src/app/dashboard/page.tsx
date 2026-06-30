@@ -2155,12 +2155,18 @@ Consider the operator's digital twin profile: ${performanceTwin}.${tasksInfo}`;
       recognition.stop();
       setIsBrowserListening(false);
     };
+
+    recognition.onend = () => {
+      setIsBrowserListening(false);
+      setOrbState(prev => prev === 'listening' ? 'idle' : prev);
+      setOrbText(prev => prev.includes("Listening") ? "Chronos Voice Link: Sync Active." : prev);
+    };
     
     recognition.onerror = (event: any) => {
       console.warn("Speech recognition error:", event.error);
       if (event.error === 'not-allowed') {
-        toast.error("Microphone access denied. Click the camera/microphone icon in the browser address bar and select 'Allow' to use voice features.");
-      } else {
+        toast.error("Microphone access denied. Please click the microphone icon in the browser address bar and select 'Allow' to use voice features.");
+      } else if (event.error !== 'no-speech') {
         toast.error(`Speech recognition failed: ${event.error}`);
       }
       setOrbState('idle');
