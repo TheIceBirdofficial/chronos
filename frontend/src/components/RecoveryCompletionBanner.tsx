@@ -13,9 +13,9 @@ interface Props {
 export default function RecoveryCompletionBanner({
   riskBefore,
   riskAfter,
-  recoveredHours = 2,
-  streakCount = 1,
-  confidenceBoost = 56,
+  recoveredHours,
+  streakCount,
+  confidenceBoost,
   durationMinutes = 1,
   onDismiss
 }: Props) {
@@ -105,15 +105,15 @@ export default function RecoveryCompletionBanner({
         {/* Statistics Grid */}
         <div className="grid grid-cols-3 gap-2 font-mono text-[10px] uppercase text-gray-400">
           <div className="bg-white/5 border border-white/5 p-2 rounded-xl">
-            <span className="block text-white font-bold text-sm">{recoveredHours}h</span>
+            <span className="block text-white font-bold text-sm">{recoveredHours != null ? `${recoveredHours}h` : '—'}</span>
             Recovered
           </div>
           <div className="bg-white/5 border border-white/5 p-2 rounded-xl">
-            <span className="block text-white font-bold text-sm">+{confidenceBoost}%</span>
+            <span className="block text-white font-bold text-sm">{confidenceBoost != null ? `+${confidenceBoost}%` : '—'}</span>
             Confidence
           </div>
           <div className="bg-white/5 border border-white/5 p-2 rounded-xl">
-            <span className="block text-[#66FCF1] font-bold text-sm glow-text">{streakCount}</span>
+            <span className="block text-[#66FCF1] font-bold text-sm glow-text">{streakCount != null ? streakCount : '—'}</span>
             Defended
           </div>
         </div>

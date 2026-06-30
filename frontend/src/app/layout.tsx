@@ -15,6 +15,7 @@ const jetbrainsMono = JetBrains_Mono({
 export const metadata: Metadata = {
   title: "Chronos | Deadline Defense System",
   description: "Continuous deadline risk evaluation and cognitive behavior twins.",
+  icons: { icon: "/favicon.svg" },
 };
 
 export default function RootLayout({

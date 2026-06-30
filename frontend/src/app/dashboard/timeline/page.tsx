@@ -90,7 +90,11 @@ function TimelinePageContent() {
       return;
     }
 
-    let retryCount = 0;
+    // Two independent retry counters:
+    //  - taskRetry: how many times we've polled while the task itself isn't found yet (max 6 × 1s = 6s)
+    //  - checkpointRetry: how many times we've polled while the task exists but checkpoints aren't ready yet (max 15 × 2s = 30s)
+    let taskRetry = 0;
+    let checkpointRetry = 0;
     let isActive = true;
 
     const fetchAndExpand = async () => {
@@ -100,30 +104,39 @@ function TimelinePageContent() {
         if (!res.ok) throw new Error('API offline');
         const tasks: Task[] = await res.json();
         const found = tasks.find(t => String(t.id) === String(taskId));
-        
+
         if (!found) {
-          if (retryCount < 6) {
-            retryCount++;
+          if (taskRetry < 6) {
+            taskRetry++;
             setTimeout(fetchAndExpand, 1000);
           } else {
+            // Task genuinely not found — show error but do NOT navigate away
             setLoading(false);
-            toast.error("Task not found in timeline database.");
-            router.push('/dashboard');
+            toast.error('Task not found in timeline database.');
           }
           return;
         }
-        
+
         setTask(found);
-        
+
         const rawTimeline = found.timeline || [];
         const hasCheckpoints = rawTimeline.length > 0 && rawTimeline.every((m: any) => m.checkpoints && m.checkpoints.length > 0);
-        
+
         if (hasCheckpoints) {
           const expanded = await expandMilestonesWithAI(found);
           setMilestones(expanded);
           setLoading(false);
+        } else if (rawTimeline.length > 0 && checkpointRetry >= 15) {
+          // Timed out waiting for checkpoints — expand with AI/fallback using what we have
+          const expanded = await expandMilestonesWithAI(found);
+          setMilestones(expanded);
+          setLoading(false);
+        } else if (rawTimeline.length === 0 && checkpointRetry >= 15) {
+          // No milestones at all after 30s — stop loading and show the empty state
+          setLoading(false);
         } else {
           // Poll again in 2s while background charting runs
+          checkpointRetry++;
           setTimeout(fetchAndExpand, 2000);
         }
       } catch (err) {
@@ -802,8 +815,8 @@ No markdown, no explanation.`;
                                   <div 
                                     className="flex-1 min-w-0 cursor-pointer"
                                     onClick={() => {
-                                      // Navigate to Sprint Timer for this checkpoint
-                                      router.push(`/dashboard/sprint?taskId=${task?.id}&checkpointId=${cp.id}&title=${encodeURIComponent(cp.title)}&detail=${encodeURIComponent(cp.detail)}&duration=${cp.estimatedMinutes}`);
+                                      if (!task?.id) return;
+                                      router.push(`/dashboard/sprint?taskId=${task.id}&checkpointId=${cp.id}&title=${encodeURIComponent(cp.title)}&detail=${encodeURIComponent(cp.detail)}&duration=${cp.estimatedMinutes}`);
                                     }}
                                   >
                                     <div className="text-[9px] font-bold text-gray-200 leading-tight truncate hover:text-purple-300">

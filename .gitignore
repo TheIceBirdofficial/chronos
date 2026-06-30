@@ -33,7 +33,7 @@ coverage/
 dist/
 build/
 *.spec
-voice_engine/voice_daemon_exe_entry.py
+# voice_engine/voice_daemon_exe_entry.py  # removed — now a tracked source file
 
 dist/
 build/

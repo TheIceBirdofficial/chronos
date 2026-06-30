@@ -1,7 +1,57 @@
-from flask import Flask, jsonify, request, send_from_directory, Response, redirect
+from flask import Flask, jsonify, request, send_from_directory, Response, redirect, g
 from flask_cors import CORS
+import os
 import requests
 import sqlite3
+
+# ── GCS Persistence (data survives container restarts) ─────────────────
+GCS_BUCKET = os.environ.get('GCS_BUCKET_NAME', '')
+_gcs_available = False
+if GCS_BUCKET:
+    try:
+        from google.cloud import storage
+        _gcs_client = storage.Client()
+        _gcs_bucket = _gcs_client.bucket(GCS_BUCKET)
+        _gcs_available = True
+        print(f"[GCS] Backup bucket configured: {GCS_BUCKET}", flush=True)
+    except Exception as e:
+        print(f"[GCS] Not available (non-fatal): {e}", flush=True)
+
+def _gcs_restore():
+    if not _gcs_available:
+        return
+    for fname in ('chronos.db', 'settings.json', 'google_tokens.json', 'interventions.json'):
+        local_path = os.path.join(os.path.dirname(__file__), fname)
+        if os.path.exists(local_path):
+            continue  # already have local data
+        try:
+            blob = _gcs_bucket.blob(f'chronos_backup/{fname}')
+            if blob.exists():
+                blob.download_to_filename(local_path)
+                print(f"[GCS] Restored {fname} from backup.", flush=True)
+        except Exception as e:
+            print(f"[GCS] Could not restore {fname}: {e}", flush=True)
+
+def _gcs_backup():
+    if not _gcs_available:
+        return
+    for fname in ('chronos.db', 'settings.json', 'google_tokens.json', 'interventions.json'):
+        local_path = os.path.join(os.path.dirname(__file__), fname)
+        if os.path.exists(local_path):
+            try:
+                blob = _gcs_bucket.blob(f'chronos_backup/{fname}')
+                blob.upload_from_filename(local_path)
+            except Exception as e:
+                print(f"[GCS] Backup failed for {fname}: {e}", flush=True)
+    print("[GCS] Backup cycle complete.", flush=True)
+
+def _gcs_backup_async():
+    if not _gcs_available:
+        return
+    threading.Thread(target=_gcs_backup, daemon=True).start()
+
+# Restore on startup
+_gcs_restore()
 
 def make_local_request(method, url, **kwargs):
     import urllib.parse
@@ -71,7 +121,6 @@ def make_local_request(method, url, **kwargs):
             
     if last_err:
         raise last_err
-import os
 import json
 import datetime
 import uuid
@@ -79,19 +128,40 @@ import queue
 import hashlib
 import threading
 import time
+from memory_engine import (
+    init_memory_table, get_memory, upsert_memory, delete_memory,
+    get_timeline, ingest_timeline_event, get_memory_summary,
+    LAYER_IDENTITY, LAYER_TWIN_PROFILE, LAYER_BEHAVIOR_MEMORY,
+    LAYER_MISSION_MEMORY, LAYER_CONVERSATION_MEMORY,
+    LAYER_REFERENCE_MEMORY, LAYER_TIMELINE_MEMORY, ALL_LAYERS
+)
 
 # Global Server-Sent Events (SSE) client list for voice telemetry
 voice_clients = []
+voice_clients_lock = threading.Lock()
 
 speech_queue = queue.Queue()
 last_voice_link_ping = 0.0
 voice_muted = False
 voice_muted_until = 0.0
 is_speaking = False
+is_speaking_lock = threading.Lock()
 voice_conversation_history = []
+active_sprints = {}
+active_sprints_lock = threading.Lock()
 
 INTERVENTIONS_FILE = os.path.join(os.path.dirname(__file__), 'interventions.json')
 last_voice_event_speak_time = 0.0
+
+# ── Proactive Monitor State ─────────────────────────────────────────────
+# Tracks what the monitor has already said to avoid repetition
+_proactive_spoken_hashes: set = set()       # hashes of recently spoken messages
+_proactive_last_spoken: float = 0.0         # wall-clock time of last proactive speech
+_proactive_last_task_snapshot: dict = {}    # task_id → {score, escalation, cp_count} at last check
+_proactive_last_check: float = 0.0          # last time we evaluated state
+_proactive_recent_spoken: list = []         # rolling log of recent spoken messages
+_proactive_rejected: list = []              # topics recently rejected / ignored by operator (max 20)
+
 
 def load_interventions():
     if not os.path.exists(INTERVENTIONS_FILE):
@@ -337,18 +407,21 @@ def evaluate_task_state_voice_events(prev, current):
 
 def broadcast_status(status, text=""):
     payload = {"status": status, "text": text}
-    for q in list(voice_clients):
-        try:
-            q.put(payload)
-        except Exception:
-            pass
+    with voice_clients_lock:
+        for q in list(voice_clients):
+            try:
+                q.put(payload)
+            except Exception:
+                pass
 
 notification_cooldowns = {}
 
 def send_phone_notification(title, message):
     global notification_cooldowns
     now = time.time()
-    notification_cooldowns = {k: v for k, v in notification_cooldowns.items() if now - v < 300.0}
+    stale = [k for k, v in notification_cooldowns.items() if now - v >= 300.0]
+    for k in stale:
+        del notification_cooldowns[k]
     
     # Check cooldown by title key prefix
     key = title[:25]
@@ -388,16 +461,380 @@ def send_phone_notification(title, message):
             
     threading.Thread(target=_run, daemon=True).start()
 
+def _proactive_should_speak(text: str, min_silence_s: float) -> bool:
+    """Return True only if this message is novel, non-repetitive, and enough time has passed."""
+    global _proactive_last_spoken, _proactive_spoken_hashes
+    now = time.time()
+    if now - _proactive_last_spoken < min_silence_s:
+        return False
+    # Hash first ~80 chars to catch rephrased-but-same-topic messages
+    h = hashlib.md5(text[:80].lower().encode()).hexdigest()
+    if h in _proactive_spoken_hashes:
+        return False
+    # Keep the hash set bounded
+    if len(_proactive_spoken_hashes) > 60:
+        _proactive_spoken_hashes.clear()
+    _proactive_spoken_hashes.add(h)
+    _proactive_last_spoken = now
+    return True
+
+
+def _proactive_queue(text: str, min_silence_s: float = 300.0) -> bool:
+    """Enqueue a proactive speech item if checks pass and voice is not muted."""
+    if not text:
+        return False
+    if voice_muted and time.time() < voice_muted_until:
+        return False
+    if _proactive_should_speak(text, min_silence_s):
+        speech_queue.put(text)
+        return True
+    return False
+
+
+import hashlib as _hashlib_mod  # noqa: E402 — already imported but aliased for clarity
+
+
+def _run_proactive_monitor():
+    """
+    Background thread: Adaptive Proactive Monitor.
+
+    Evaluates operator risk state and decides whether to speak.
+    Cadence is determined by risk level — not fixed intervals.
+
+    Risk levels → silence floors:
+      LOW      (score ≥ 80, green)   → check every 10 min, speak floor 30 min
+      MEDIUM   (score 50-79, yellow) → check every 5 min,  speak floor 12 min
+      HIGH     (score 25-49, orange) → check every 3 min,  speak floor 7 min
+      CRITICAL (score < 25, red/black)→ check every 90s,   speak floor 4 min
+    """
+    global _proactive_last_task_snapshot, _proactive_last_check, _proactive_recent_spoken
+
+    import hashlib
+    import datetime as _dt
+
+    # Give the server 20s to fully start before first check
+    time.sleep(20)
+
+    while True:
+        try:
+            now = time.time()
+
+            # ── 1. Load all tasks for *all* users (monitor runs server-wide) ──
+            try:
+                conn = get_db_conn()
+                conn.row_factory = sqlite3.Row
+                cur = conn.cursor()
+                cur.execute("SELECT * FROM tasks WHERE completed = 0")
+                rows = cur.fetchall()
+                conn.close()
+            except Exception as db_err:
+                print(f"[ProactiveMonitor] DB read error: {db_err}", flush=True)
+                time.sleep(60)
+                continue
+
+            active_tasks = []
+            for row in rows:
+                t = dict(row)
+                try:
+                    t['timeline'] = json.loads(t['timeline']) if t.get('timeline') else []
+                except Exception:
+                    t['timeline'] = []
+                active_tasks.append(t)
+
+            if not active_tasks:
+                time.sleep(120)
+                continue
+
+            # ── 2. Determine highest-risk task ──────────────────────────────
+            def _score(t):
+                return t.get('survivalScore', 100) or 100
+
+            worst = min(active_tasks, key=_score)
+            worst_score = _score(worst)
+            worst_title = worst.get('title', 'your task')
+            worst_id = str(worst.get('id', ''))
+            worst_escalation = worst.get('escalationLevel', 'green')
+            worst_due = worst.get('due', '')
+
+            # Hours until deadline
+            hours_left = None
+            if worst_due:
+                try:
+                    due_dt = datetime.datetime.fromisoformat(
+                        worst_due.replace('Z', '+00:00')
+                    ).replace(tzinfo=None)
+                    hours_left = (due_dt - datetime.datetime.now()).total_seconds() / 3600.0
+                except Exception:
+                    pass
+
+            # ── 3. Pick cadence based on risk ──────────────────────────────
+            if worst_score >= 80 or worst_escalation == 'green':
+                check_interval = 600        # 10 min
+                speak_floor    = 1800       # 30 min minimum silence
+                risk_label     = 'LOW'
+            elif worst_score >= 50 or worst_escalation == 'yellow':
+                check_interval = 300        # 5 min
+                speak_floor    = 720        # 12 min
+                risk_label     = 'MEDIUM'
+            elif worst_score >= 25 or worst_escalation == 'orange':
+                check_interval = 180        # 3 min
+                speak_floor    = 420        # 7 min
+                risk_label     = 'HIGH'
+            else:
+                check_interval = 90         # 90 s
+                speak_floor    = 240        # 4 min
+                risk_label     = 'CRITICAL'
+
+            # Respect cadence — don't evaluate more often than check_interval
+            if now - _proactive_last_check < check_interval:
+                time.sleep(10)
+                continue
+            _proactive_last_check = now
+
+            print(
+                f"[ProactiveMonitor] Evaluating — Risk: {risk_label}, "
+                f"Worst task: '{worst_title}' ({worst_score}%)",
+                flush=True
+            )
+
+            # ── 4. Snapshot delta — what changed since last check? ──────────
+            prev_snap = _proactive_last_task_snapshot.get(worst_id, {})
+            prev_score = prev_snap.get('score', worst_score)
+            prev_cp    = prev_snap.get('cp_count', 0)
+
+            curr_cp = sum(
+                1 for m in (worst.get('timeline') or [])
+                for cp in (m.get('checkpoints', []) if isinstance(m, dict) else [])
+                if cp.get('status') == 'completed' or cp.get('completed', False)
+            )
+
+            _proactive_last_task_snapshot[worst_id] = {
+                'score': worst_score,
+                'escalation': worst_escalation,
+                'cp_count': curr_cp,
+                'checked_at': now,
+            }
+
+            # ── 5. Generate intervention if warranted ──────────────────────
+            spoken = False
+
+            # Gather active sprint info
+            user_id = worst.get('user_id', 'anonymous')
+            with active_sprints_lock:
+                sprint = active_sprints.get(user_id, {"active": False})
+            
+            sprint_info = "None"
+            if sprint.get("active"):
+                status_str = "PAUSED" if sprint.get("paused") else "ACTIVE"
+                mins_left = int(sprint.get("seconds_left", 0) / 60)
+                sprint_info = f"Focused Pomodoro session is currently {status_str} with {mins_left} minutes remaining."
+
+            # Get user twin profile settings
+            twin_profile = ""
+            try:
+                conn = get_db_conn()
+                conn.row_factory = sqlite3.Row
+                cursor = conn.cursor()
+                cursor.execute("SELECT twinProfile FROM settings WHERE user_id = ? LIMIT 1", (user_id,))
+                row = cursor.fetchone()
+                if row:
+                    twin_profile = row['twinProfile']
+                conn.close()
+            except Exception:
+                pass
+
+            # Gather calendar info
+            calendar_info = "No upcoming calendar events / meetings."
+            try:
+                events = get_google_calendar_events()
+                if events:
+                    gcal_list = []
+                    for ev in events[:3]:
+                        summary = ev.get('summary', 'Meeting')
+                        start = ev.get('start', {}).get('dateTime') or ev.get('start', {}).get('date', '')
+                        gcal_list.append(f"'{summary}' scheduled at {start}")
+                    calendar_info = "; ".join(gcal_list)
+            except Exception:
+                pass
+
+            # Get timeline & checkpoints info
+            total_cps = 0
+            completed_cps = 0
+            for m in (worst.get('timeline') or []):
+                if isinstance(m, dict):
+                    for cp in m.get('checkpoints', []):
+                        total_cps += 1
+                        if cp.get('status') == 'completed' or cp.get('completed', False):
+                            completed_cps += 1
+            
+            recent_spoken_str = "None"
+            if _proactive_recent_spoken:
+                recent_spoken_str = " | ".join(_proactive_recent_spoken)
+
+            ai_config = get_ai_config_from_db()
+            
+            # Query AI to make the proactive speaking decision
+            if ai_config and ai_config.get('apiKey'):
+                try:
+                    prompt = (
+                        f"You are Chronos Ops, the tactical AI deadline defense system.\n"
+                        f"Evaluate the operator's current telemetry to decide whether a proactive spoken operations briefing or warning is useful.\n\n"
+                        f"Current Telemetry:\n"
+                        f"- Twin Profile: {twin_profile}\n"
+                        f"- Highest-Risk Task: '{worst_title}'\n"
+                        f"  - Importance: {worst_escalation.upper()} / {worst.get('importance', 'medium').upper()}\n"
+                        f"  - Survival Probability: {worst_score}%\n"
+                        f"  - Escalation Level: {worst_escalation.upper()}\n"
+                        f"  - Time remaining to deadline: {hours_left:.1f} hours\n"
+                        f"  - Progress: {completed_cps} of {total_cps} checkpoints completed.\n"
+                        f"  - Recovery Active: {worst.get('recoveryActive', False)} (Progress: {worst.get('recoveryProgress', 0.0)*100:.1f}%)\n"
+                        f"- Active Pomodoro Sprint: {sprint_info}\n"
+                        f"- Calendar context: {calendar_info}\n"
+                        f"- Recent briefings you spoke: {recent_spoken_str}\n\n"
+                        f"Rules for Intervention:\n"
+                        f"1. Silence is preferred. Only intervene if the risk level is MEDIUM or higher (survival < 80%) AND there is a clear trigger: deadline compression, prolonged inactivity, a stalled sprint, ignored recovery, or key trajectory change.\n"
+                        f"2. If no check-in/intervention is needed right now, reply with EXACTLY 'SILENT' and nothing else.\n"
+                        f"3. If an intervention is needed, reply with a calm, professional, reassuring operations update (max 2 sentences, 35 words). Speak directly to the operator.\n"
+                        f"4. NEVER use generic motivational catchphrases ('Keep working', 'Don't procrastinate', 'You can do it'). Instead, provide specific analytical observations.\n"
+                        f"5. NEVER fabricate or hallucinate any facts. Only speak using the facts above.\n"
+                        f"6. Do NOT mention or repeat any of your recent updates: {recent_spoken_str}."
+                    )
+                    
+                    response = query_ai_direct(
+                        ai_config.get('provider', 'gemini'),
+                        ai_config.get('apiUrl'),
+                        ai_config.get('apiKey'),
+                        ai_config.get('model'),
+                        [{"role": "user", "content": prompt}],
+                        timeout=12
+                    )
+                    
+                    if response:
+                        ai_text = response.strip()
+                        if ai_text and ai_text.upper() != "SILENT" and not ai_text.startswith("SILENT"):
+                            # Filter out any weird markdown formatting
+                            ai_text = ai_text.replace("**", "").replace("`", "").replace("Chronos Ops:", "").strip()
+                            # Queue it!
+                            spoken = _proactive_queue(ai_text, speak_floor)
+                            if spoken:
+                                # Update recent spoken memory
+                                _proactive_recent_spoken.append(ai_text)
+                                if len(_proactive_recent_spoken) > 5:
+                                    _proactive_recent_spoken.pop(0)
+                                print(f"[ProactiveMonitor] AI decided to speak: '{ai_text}'", flush=True)
+                except Exception as ai_err:
+                    print(f"[ProactiveMonitor] AI-driven decision failed: {ai_err}. Falling back to rules.", flush=True)
+
+            # Fallback to rules if AI is offline, failed, or chose not to speak but rules dictate check-in
+            if not spoken:
+                # 5a. Deadline imminent and critical
+                if (
+                    not spoken
+                    and hours_left is not None
+                    and hours_left <= 2.0
+                    and hours_left > 0
+                    and worst_score < 40
+                ):
+                    mins_left = int(hours_left * 60)
+                    text = (
+                        f"Attention. '{worst_title}' has approximately {mins_left} minutes "
+                        f"remaining and a survival score of {worst_score} percent. "
+                        f"Immediate focused effort is required."
+                    )
+                    spoken = _proactive_queue(text, speak_floor)
+
+                # 5b. Score dropped sharply since last check (rapid deterioration)
+                if (
+                    not spoken
+                    and prev_score - worst_score >= 12
+                    and not (prev_score == worst_score)
+                ):
+                    drop = int(prev_score - worst_score)
+                    text = (
+                        f"Risk alert. The survival probability for '{worst_title}' "
+                        f"dropped {drop} points since the last assessment. "
+                        f"Current score is {worst_score} percent."
+                    )
+                    spoken = _proactive_queue(text, speak_floor)
+
+                # 5c. No checkpoint progress on a critical task
+                if (
+                    not spoken
+                    and curr_cp == prev_cp
+                    and worst_score < 45
+                    and risk_label in ('HIGH', 'CRITICAL')
+                    and (now - prev_snap.get('checked_at', now - 9999)) > speak_floor
+                ):
+                    total_cps = sum(
+                        len(m.get('checkpoints', []))
+                        for m in (worst.get('timeline') or [])
+                        if isinstance(m, dict)
+                    )
+                    if total_cps > 0:
+                        text = (
+                            f"No checkpoint progress has been recorded for '{worst_title}'. "
+                            f"{curr_cp} of {total_cps} steps completed. "
+                            f"Resuming work now would improve the survival estimate."
+                        )
+                        spoken = _proactive_queue(text, speak_floor)
+
+                # 5d. Deadline within 4 hours with medium+ risk (heads-up)
+                if (
+                    not spoken
+                    and hours_left is not None
+                    and 2.0 < hours_left <= 4.0
+                    and worst_score < 60
+                ):
+                    text = (
+                        f"'{worst_title}' is due in approximately {int(hours_left)} hours "
+                        f"with a survival score of {worst_score} percent. "
+                        f"Consider reviewing the recovery checklist."
+                    )
+                    spoken = _proactive_queue(text, speak_floor)
+
+                # 5e. Multiple high-risk tasks
+                if not spoken:
+                    critical_tasks = [
+                        t for t in active_tasks
+                        if (t.get('survivalScore') or 100) < 35
+                    ]
+                    if len(critical_tasks) >= 2:
+                        titles = " and ".join(f"'{t['title']}'" for t in critical_tasks[:2])
+                        text = (
+                            f"You currently have {len(critical_tasks)} tasks below "
+                            f"35 percent survival probability, including {titles}. "
+                            f"Prioritising the most urgent is recommended."
+                        )
+                        spoken = _proactive_queue(text, speak_floor)
+
+            if spoken:
+                print(f"[ProactiveMonitor] Intervention queued (risk={risk_label}).", flush=True)
+
+        except Exception as monitor_err:
+            print(f"[ProactiveMonitor] Unexpected error: {monitor_err}", flush=True)
+
+        time.sleep(10)
+
+
+# Start the proactive monitoring thread
+_proactive_thread = threading.Thread(target=_run_proactive_monitor, daemon=True, name="ProactiveMonitor")
+_proactive_thread.start()
+print("[ProactiveMonitor] Adaptive intervention monitor started.", flush=True)
+
+
 def speech_worker():
+
     global is_speaking
     while True:
         try:
             text = speech_queue.get()
             if text is None:
-                is_speaking = False
+                with is_speaking_lock:
+                    is_speaking = False
                 break
             
-            is_speaking = True
+            with is_speaking_lock:
+                is_speaking = True
             print(f"[Headless Voice Coordinator] Broadcasting speech: '{text}'", flush=True)
             broadcast_status("speaking", text)
             
@@ -405,24 +842,33 @@ def speech_worker():
             speak_duration = max(1.5, len(text) * 0.08)
             time.sleep(speak_duration)
             
-            is_speaking = False
+            with is_speaking_lock:
+                is_speaking = False
             speech_queue.task_done()
             
             if speech_queue.empty():
                 broadcast_status("idle", "Chronos Voice Link: Sync Active.")
         except Exception as e:
-            is_speaking = False
+            with is_speaking_lock:
+                is_speaking = False
             print(f"[Speech Worker Error] {e}", flush=True)
             time.sleep(0.1)
 
 # Start the headless speech worker thread
-if os.environ.get('WERKZEUG_RUN_MAIN') == 'true' or not os.environ.get('FLASK_USE_RELOADER', 'true') == 'true':
-    worker_thread = threading.Thread(target=speech_worker, daemon=True)
-    worker_thread.start()
-    print("[Headless Voice Coordinator] Speech worker thread active.")
+worker_thread = threading.Thread(target=speech_worker, daemon=True)
+worker_thread.start()
+print("[Headless Voice Coordinator] Speech worker thread active.")
 
 app = Flask(__name__, static_folder='../frontend', static_url_path='')
-CORS(app)
+CORS(app, supports_credentials=True)
+
+@app.before_request
+def set_user_id():
+    uid = request.headers.get('X-User-Id', '').strip()
+    g.user_id = uid if uid else 'anonymous'
+    if not g.user_id:
+        g.user_id = 'anonymous'
+    print(f"[DEBUG set_user_id] path={request.path}, method={request.method}, X-User-Id={uid}, resolved={g.user_id}", flush=True)
 
 # Persistent Database File path (SQLite)
 SQLITE_DB = os.environ.get("SQLITE_DB_PATH", os.path.join(os.path.dirname(__file__), 'chronos.db'))
@@ -439,7 +885,8 @@ def init_sqlite_db():
     # Settings table
     cursor.execute("""
     CREATE TABLE IF NOT EXISTS settings (
-        id TEXT PRIMARY KEY,
+        id TEXT,
+        user_id TEXT DEFAULT 'anonymous',
         username TEXT,
         sleepStart INTEGER,
         sleepEnd INTEGER,
@@ -451,14 +898,16 @@ def init_sqlite_db():
         executionCount INTEGER,
         failureCount INTEGER,
         streakCount INTEGER,
-        totalRecoveredHours REAL
+        totalRecoveredHours REAL,
+        PRIMARY KEY (id, user_id)
     )
     """)
     
     # Tasks table
     cursor.execute("""
     CREATE TABLE IF NOT EXISTS tasks (
-        id TEXT PRIMARY KEY,
+        id TEXT,
+        user_id TEXT DEFAULT 'anonymous',
         title TEXT,
         due TEXT,
         created TEXT,
@@ -478,56 +927,71 @@ def init_sqlite_db():
         negotiationLog TEXT,
         category TEXT,
         timeline TEXT,
-        delayHistory TEXT
+        delayHistory TEXT,
+        PRIMARY KEY (id, user_id)
     )
     """)
     
-    # Populate default settings row if not exists
-    cursor.execute("SELECT COUNT(*) FROM settings WHERE id = 'active_operator'")
+    # Migrate existing databases that lack user_id column
+    try:
+        cursor.execute("ALTER TABLE tasks ADD COLUMN user_id TEXT DEFAULT 'anonymous'")
+    except sqlite3.OperationalError:
+        pass
+    try:
+        cursor.execute("ALTER TABLE settings ADD COLUMN user_id TEXT DEFAULT 'anonymous'")
+    except sqlite3.OperationalError:
+        pass
+    
+    # Populate default settings row if not exists (only for anonymous users, compat)
+    cursor.execute("SELECT COUNT(*) FROM settings WHERE id = 'active_operator' AND user_id = 'anonymous'")
     if cursor.fetchone()[0] == 0:
-        # Load from settings.json if it exists, to preserve user settings on upgrade
-        settings_file = os.path.join(os.path.dirname(__file__), 'settings.json')
-        username = "user"
-        sleep_start = 23
-        sleep_end = 7
-        ntfy_topic = "chronos-alerts-user"
-        twin_profile = ""
-        if os.path.exists(settings_file):
-            try:
-                with open(settings_file, 'r') as f:
-                    cfg = json.load(f)
-                    username = cfg.get('username', 'user')
-                    sleep_start = int(cfg.get('sleepStart', 23))
-                    sleep_end = int(cfg.get('sleepEnd', 7))
-                    ntfy_topic = cfg.get('ntfyTopic', 'chronos-alerts-user')
-                    twin_profile = cfg.get('twinProfile', '')
-            except Exception:
-                pass
         cursor.execute("""
-        INSERT INTO settings (
-            id, username, sleepStart, sleepEnd, ntfyTopic, twinProfile, 
+        INSERT OR IGNORE INTO settings (
+            id, user_id, username, sleepStart, sleepEnd, ntfyTopic, twinProfile, 
             procrastinationRating, attentionCycle, stressResponse, 
             executionCount, failureCount, streakCount, totalRecoveredHours
         ) VALUES (
-            'active_operator', ?, ?, ?, ?, ?,
+            'active_operator', 'anonymous', 'user', 23, 7, 'chronos-alerts-user', '',
             8.0, 'Focus cycles peak late evening', 'Postpones tasks under high workload pressure',
             0, 0, 0, 0.0
         )
-        """, (username, sleep_start, sleep_end, ntfy_topic, twin_profile))
+        """)
         conn.commit()
     conn.close()
 
 # Initialize DB immediately
 init_sqlite_db()
+init_memory_table()
+
+# Migrate: add onboarding_completed column if not exists
+try:
+    conn = get_db_conn()
+    conn.execute("ALTER TABLE settings ADD COLUMN onboarding_completed INTEGER DEFAULT 0")
+    conn.commit()
+    conn.close()
+except sqlite3.OperationalError:
+    pass
+
+# Migrate: add rescueResources column if not exists
+try:
+    conn = get_db_conn()
+    conn.execute("ALTER TABLE tasks ADD COLUMN rescueResources TEXT")
+    conn.commit()
+    conn.close()
+except sqlite3.OperationalError:
+    pass
+
 
 # --- Database Operations Adapter ---
 
-def load_tasks_db():
+def load_tasks_db(user_id=None):
     try:
+        if user_id is None:
+            user_id = getattr(g, 'user_id', 'anonymous')
         conn = get_db_conn()
         conn.row_factory = sqlite3.Row
         cursor = conn.cursor()
-        cursor.execute("SELECT * FROM tasks")
+        cursor.execute("SELECT * FROM tasks WHERE user_id = ?", (user_id,))
         rows = cursor.fetchall()
         conn.close()
         
@@ -562,15 +1026,22 @@ def load_tasks_db():
                 t['delayHistory'] = json.loads(t['delayHistory']) if t['delayHistory'] else []
             except Exception:
                 t['delayHistory'] = []
-                
+
+            try:
+                t['rescueResources'] = json.loads(t['rescueResources']) if t.get('rescueResources') else None
+            except Exception:
+                t['rescueResources'] = None
+
             tasks_list.append(t)
         return tasks_list
     except Exception as e:
         print(f"[CHRONOS DB] SQLite read error: {e}")
         return []
 
-def save_task_db(task):
+def save_task_db(task, user_id=None):
     try:
+        if user_id is None:
+            user_id = task.get('user_id') or getattr(g, 'user_id', 'anonymous')
         task['id'] = str(task['id'])
         
         # Load previous task state from SQLite to compare transitions
@@ -579,7 +1050,7 @@ def save_task_db(task):
             conn_prev = get_db_conn()
             conn_prev.row_factory = sqlite3.Row
             cursor_prev = conn_prev.cursor()
-            cursor_prev.execute("SELECT * FROM tasks WHERE id = ?", (task['id'],))
+            cursor_prev.execute("SELECT * FROM tasks WHERE id = ? AND user_id = ?", (task['id'], user_id))
             row = cursor_prev.fetchone()
             if row:
                 prev_task = dict(row)
@@ -605,6 +1076,7 @@ def save_task_db(task):
         negotiation_str = json.dumps(task.get('negotiationLog', []))
         timeline_str = json.dumps(task.get('timeline', []))
         delay_history_str = json.dumps(task.get('delayHistory', []))
+        rescue_resources_str = json.dumps(task.get('rescueResources')) if task.get('rescueResources') is not None else None
         
         completed_val = 1 if task.get('completed', False) else 0
         collapse_val = 1 if task.get('deadlineCollapse', False) else 0
@@ -612,12 +1084,12 @@ def save_task_db(task):
         
         cursor.execute("""
         INSERT INTO tasks (
-            id, title, due, created, estimatedHours, importance, completed,
+            id, user_id, title, due, created, estimatedHours, importance, completed,
             survivalScore, escalationLevel, pointOfNoReturn, deadlineCollapse,
             delayCount, events, recoveryActive, recoveryProgress, recoveryChecklist,
-            riskBeforeRecovery, negotiationLog, category, timeline, delayHistory
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        ON CONFLICT(id) DO UPDATE SET
+            riskBeforeRecovery, negotiationLog, category, timeline, delayHistory, rescueResources
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(id, user_id) DO UPDATE SET
             title=excluded.title,
             due=excluded.due,
             created=excluded.created,
@@ -637,9 +1109,11 @@ def save_task_db(task):
             negotiationLog=excluded.negotiationLog,
             category=excluded.category,
             timeline=excluded.timeline,
-            delayHistory=excluded.delayHistory
+            delayHistory=excluded.delayHistory,
+            rescueResources=excluded.rescueResources
         """, (
             str(task['id']),
+            user_id,
             task.get('title', ''),
             task.get('due', ''),
             task.get('created', ''),
@@ -659,30 +1133,36 @@ def save_task_db(task):
             negotiation_str,
             task.get('category', ''),
             timeline_str,
-            delay_history_str
+            delay_history_str,
+            rescue_resources_str
         ))
         
         conn.commit()
         conn.close()
+        _gcs_backup_async()
     except Exception as e:
         print(f"[CHRONOS DB] SQLite write error: {e}")
 
-def delete_task_db(tid):
+def delete_task_db(tid, user_id=None):
     try:
+        if user_id is None:
+            user_id = getattr(g, 'user_id', 'anonymous')
         conn = get_db_conn()
         cursor = conn.cursor()
-        cursor.execute("DELETE FROM tasks WHERE id = ?", (str(tid),))
+        cursor.execute("DELETE FROM tasks WHERE id = ? AND user_id = ?", (str(tid), user_id))
         conn.commit()
         conn.close()
     except Exception as e:
         print(f"[CHRONOS DB] SQLite delete error: {e}")
 
-def update_twin_metrics(completed_change=None, failure_change=None, recovered_hours_change=None):
+def update_twin_metrics(completed_change=None, failure_change=None, recovered_hours_change=None, user_id=None):
     try:
+        if user_id is None:
+            user_id = getattr(g, 'user_id', 'anonymous')
         conn = get_db_conn()
         cursor = conn.cursor()
         
-        cursor.execute("SELECT executionCount, failureCount, streakCount, totalRecoveredHours FROM settings WHERE id = 'active_operator'")
+        cursor.execute("SELECT executionCount, failureCount, streakCount, totalRecoveredHours FROM settings WHERE id = 'active_operator' AND user_id = ?", (user_id,))
         row = cursor.fetchone()
         if not row:
             conn.close()
@@ -714,8 +1194,8 @@ def update_twin_metrics(completed_change=None, failure_change=None, recovered_ho
             failureCount = ?,
             streakCount = ?,
             totalRecoveredHours = ?
-        WHERE id = 'active_operator'
-        """, (execution_count, failure_count, streak_count, total_recovered_hours))
+        WHERE id = 'active_operator' AND user_id = ?
+        """, (execution_count, failure_count, streak_count, total_recovered_hours, user_id))
         
         conn.commit()
         conn.close()
@@ -786,11 +1266,12 @@ def query_ai_direct(provider, api_url, api_key, model, messages, timeout=30):
                 elif role == 'assistant':
                     contents.append({"role": "model", "parts": [{"text": content}]})
             gemini_model = model or 'gemini-1.5-flash'
-            url = f"https://generativelanguage.googleapis.com/v1beta/models/{gemini_model}:generateContent?key={api_key}"
+            url = f"https://generativelanguage.googleapis.com/v1beta/models/{gemini_model}:generateContent"
+            headers_gemini = {"X-Goog-Api-Key": api_key, "Content-Type": "application/json"}
             payload = {"contents": contents, "generationConfig": {"temperature": 0.7}}
             if system_instruction:
                 payload["systemInstruction"] = {"parts": [{"text": system_instruction}]}
-            response = requests.post(url, json=payload, timeout=timeout)
+            response = requests.post(url, json=payload, headers=headers_gemini, timeout=timeout)
             response.raise_for_status()
             res_data = response.json()
             return res_data['candidates'][0]['content']['parts'][0]['text']
@@ -799,7 +1280,7 @@ def query_ai_direct(provider, api_url, api_key, model, messages, timeout=30):
         elif provider == 'nvidia':
             url = f"{api_url or 'https://integrate.api.nvidia.com/v1'}/chat/completions"
             headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
-            payload = {"model": model or "meta/llama-3-70b-instruct", "messages": messages, "temperature": 0.5, "max_tokens": 1024, "stream": False}
+            payload = {"model": model or "meta/llama-3.1-8b-instruct", "messages": messages, "temperature": 0.5, "max_tokens": 1024, "stream": False}
             response = requests.post(url, json=payload, headers=headers, timeout=timeout)
             response.raise_for_status()
             return response.json().get('choices', [{}])[0].get('message', {}).get('content', '')
@@ -839,10 +1320,11 @@ def get_ai_config_from_db():
     return {'provider': 'gemini', 'apiUrl': 'https://generativelanguage.googleapis.com/v1beta', 'apiKey': '', 'model': 'gemini-1.5-flash'}
 
 
-def generate_dynamic_timeline(title, due_str, twin_profile="", ai_config=None):
+def generate_dynamic_timeline(title, due_str, twin_profile="", ai_config=None, user_id=None):
     """
-    Generates a dynamic 3-phase timeline based on the title, due date, and user profile.
+    Generates a dynamic timeline based on the title, due date, and user profile.
     Uses the configured AI supplier when available, falls back to rule-based computation.
+    AI decides number of phases, phase names, phase order, subtasks, and estimated duration.
     """
     now = datetime.datetime.now()
     due = now + datetime.timedelta(hours=4)
@@ -874,7 +1356,7 @@ def generate_dynamic_timeline(title, due_str, twin_profile="", ai_config=None):
     try:
         conn = get_db_conn()
         cursor = conn.cursor()
-        cursor.execute("SELECT sleepStart, sleepEnd, procrastinationRating FROM settings LIMIT 1")
+        cursor.execute("SELECT sleepStart, sleepEnd, procrastinationRating FROM settings WHERE id = 'active_operator' AND user_id = ?", (user_id,))
         row = cursor.fetchone()
         if row:
             sleep_start = int(row[0])
@@ -889,13 +1371,13 @@ def generate_dynamic_timeline(title, due_str, twin_profile="", ai_config=None):
         try:
             prompt = (
                 f"You are a master timeline partitioner. Current time is {now.strftime('%A, %d %b at %I:%M %p')}. "
-                f"Generate a task breakdown timeline of exactly 3 sequential phases for the task '{title}' which is due at {due.strftime('%A, %d %b at %I:%M %p')} ({total_hours:.1f} hours from now). "
-                f"User sleep schedule is from {sleep_start}:00 to {sleep_end}:00. Procrastination factor is {procrastination_rating}/10. "
+                f"Generate a task breakdown timeline for '{title}' due at {due.strftime('%A, %d %b at %I:%M %p')} ({total_hours:.1f} hours from now). "
+                f"User sleep schedule: {sleep_start}:00 to {sleep_end}:00. Procrastination factor: {procrastination_rating}/10. "
                 f"User profile: {twin_profile}. "
-                f"Partition the time accurately. All phase scheduledTimes MUST fall outside the user's sleep window and be placed at highly productive hours. "
-                f"Phase 1 should be scheduled early to combat procrastination. Phase 2 should cover the core effort. Phase 3 should cover the review. "
-                f"Respond with ONLY a raw JSON array of 3 objects, each having keys: 'title' (actionable, detailed subtask description) and 'scheduledTime' (formatted as 'Today at 8:00 PM', 'Tomorrow at 10:30 AM', etc.). "
-                f"Output ONLY the JSON array, no markdown, no explanation."
+                f"Decide the optimal number of phases (2-5) based on complexity and time available. "
+                f"Partition time accurately, avoiding sleep windows and placing work at productive hours. Phase 1 should start early. "
+                f"Respond with ONLY a raw JSON array of objects, each having keys: 'title' (actionable subtask) and 'scheduledTime' (formatted as 'Today at 8:00 PM'). "
+                f"Return the appropriate number of phases based on the task's scope and due time."
             )
             reply = query_ai_direct(
                 ai_config.get('provider', 'gemini'),
@@ -907,7 +1389,6 @@ def generate_dynamic_timeline(title, due_str, twin_profile="", ai_config=None):
             )
             if reply:
                 content = reply.strip()
-                # Strip markdown code blocks if present
                 if '```' in content:
                     parts = content.split('```')
                     for part in parts:
@@ -918,9 +1399,10 @@ def generate_dynamic_timeline(title, due_str, twin_profile="", ai_config=None):
                             content = stripped
                             break
                 phases = json.loads(content)
-                if isinstance(phases, list) and len(phases) >= 3:
+                if isinstance(phases, list) and len(phases) >= 2:
                     timeline = []
-                    for i, p in enumerate(phases[:3]):
+                    phase_count = len(phases)
+                    for i, p in enumerate(phases):
                         timeline.append({
                             "id": f"m{i+1}",
                             "title": p.get("title", f"Phase {i+1}"),
@@ -931,20 +1413,46 @@ def generate_dynamic_timeline(title, due_str, twin_profile="", ai_config=None):
         except Exception as e:
             print(f"[Timeline Gen] AI supplier generation failed: {e}", flush=True)
         
-    p1_time = now + datetime.timedelta(hours=total_hours * 0.2)
-    p2_time = now + datetime.timedelta(hours=total_hours * 0.6)
-    p3_time = now + datetime.timedelta(hours=total_hours * 0.9)
-            
-    return [
-        {"id": "m1", "title": f"Initiate: Core research & structure for '{title}'", "status": "pending", "scheduledTime": format_time_ref(p1_time)},
-        {"id": "m2", "title": f"Execute: Draft & build main components of '{title}'", "status": "pending", "scheduledTime": format_time_ref(p2_time)},
-        {"id": "m3", "title": f"Finalize: Complete review & submit '{title}'", "status": "pending", "scheduledTime": format_time_ref(p3_time)}
-    ]
+    # Intelligent fallback based on time available
+    if total_hours < 6:
+        # Quick task: 2 phases
+        p1_time = now + datetime.timedelta(hours=total_hours * 0.4)
+        p2_time = now + datetime.timedelta(hours=total_hours * 0.85)
+        return [
+            {"id": "m1", "title": f"Complete: '{title}'", "status": "pending", "scheduledTime": format_time_ref(p1_time)},
+            {"id": "m2", "title": f"Review & submit '{title}'", "status": "pending", "scheduledTime": format_time_ref(p2_time)}
+        ]
+    elif total_hours < 24:
+        # Same day task: 3 phases
+        p1_time = now + datetime.timedelta(hours=total_hours * 0.25)
+        p2_time = now + datetime.timedelta(hours=total_hours * 0.6)
+        p3_time = now + datetime.timedelta(hours=total_hours * 0.9)
+        return [
+            {"id": "m1", "title": f"Initiate: Research & structure for '{title}'", "status": "pending", "scheduledTime": format_time_ref(p1_time)},
+            {"id": "m2", "title": f"Execute: Build core for '{title}'", "status": "pending", "scheduledTime": format_time_ref(p2_time)},
+            {"id": "m3", "title": f"Finalize: Review & submit '{title}'", "status": "pending", "scheduledTime": format_time_ref(p3_time)}
+        ]
+    else:
+        # Multi-day task: 5 phases with milestones
+        p1_time = now + datetime.timedelta(hours=total_hours * 0.15)
+        p2_time = now + datetime.timedelta(hours=total_hours * 0.35)
+        p3_time = now + datetime.timedelta(hours=total_hours * 0.55)
+        p4_time = now + datetime.timedelta(hours=total_hours * 0.75)
+        p5_time = now + datetime.timedelta(hours=total_hours * 0.95)
+        return [
+            {"id": "m1", "title": f"Plan: Define scope & requirements for '{title}'", "status": "pending", "scheduledTime": format_time_ref(p1_time)},
+            {"id": "m2", "title": f"Research: Gather resources & references for '{title}'", "status": "pending", "scheduledTime": format_time_ref(p2_time)},
+            {"id": "m3", "title": f"Build: Core implementation of '{title}'", "status": "pending", "scheduledTime": format_time_ref(p3_time)},
+            {"id": "m4", "title": f"Test: Verify & refine '{title}'", "status": "pending", "scheduledTime": format_time_ref(p4_time)},
+            {"id": "m5", "title": f"Deploy: Final review & submit '{title}'", "status": "pending", "scheduledTime": format_time_ref(p5_time)}
+        ]
 
 
 AI_EVALUATION_CACHE = {}
 
-def run_autonomous_agent_decisions(task, level, survival_score, sleep_start, sleep_end, twin_profile, ai_config):
+def run_autonomous_agent_decisions(task, level, survival_score, sleep_start, sleep_end, twin_profile, ai_config, user_id=None):
+    if user_id is None:
+        user_id = getattr(g, 'user_id', 'anonymous')
     now = datetime.datetime.now()
     events = task.get('events', [])
     modified = False
@@ -973,7 +1481,7 @@ def run_autonomous_agent_decisions(task, level, survival_score, sleep_start, sle
     try:
         conn = get_db_conn()
         cursor = conn.cursor()
-        cursor.execute("SELECT procrastinationRating FROM settings WHERE id = 'active_operator' LIMIT 1")
+        cursor.execute("SELECT procrastinationRating FROM settings WHERE id = 'active_operator' AND user_id = ?", (user_id,))
         row = cursor.fetchone()
         conn.close()
         if row:
@@ -1161,11 +1669,13 @@ Respond ONLY with a raw JSON array of 2 strings: ["Step 1", "Step 2"]."""
     return task
 
 
-def evaluate_task(task, twin_profile="", is_pulse=False):
+def evaluate_task(task, twin_profile="", is_pulse=False, user_id=None):
     """
     Risk Agent: Recalculates survival scores, deterioration history, and 'Point of No Return'.
     Intervention Agent: Assigns 5-stage escalation levels and generates alerts.
     """
+    if user_id is None:
+        user_id = getattr(g, 'user_id', 'anonymous')
     due_str = task.get('due')
     if not due_str:
         return task
@@ -1207,7 +1717,7 @@ def evaluate_task(task, twin_profile="", is_pulse=False):
     try:
         conn = get_db_conn()
         cursor = conn.cursor()
-        cursor.execute("SELECT sleepStart, sleepEnd, procrastinationRating FROM settings WHERE id = 'active_operator'")
+        cursor.execute("SELECT sleepStart, sleepEnd, procrastinationRating FROM settings WHERE id = 'active_operator' AND user_id = ?", (user_id,))
         row = cursor.fetchone()
         conn.close()
         if row:
@@ -1250,6 +1760,7 @@ def evaluate_task(task, twin_profile="", is_pulse=False):
     ]
     log_message = None
 
+    ai_config = None
     task_id = str(task.get('id'))
     cached_eval = AI_EVALUATION_CACHE.get(task_id) if is_pulse else None
     
@@ -1436,7 +1947,7 @@ Respond ONLY with raw JSON. No markdown, no explanation."""
     task['events'] = events
     
     # Run autonomous agent decisions & overrides
-    task = run_autonomous_agent_decisions(task, level, survival_score, sleep_start, sleep_end, twin_profile, ai_config)
+    task = run_autonomous_agent_decisions(task, level, survival_score, sleep_start, sleep_end, twin_profile, ai_config, user_id=user_id)
     
     return task
 
@@ -1491,27 +2002,52 @@ def generate_fallback_timeline(title, due_str):
         }
     ]
 
-def background_generate_timeline_and_checkpoints(task_id, title, due, twin_profile, ai_config):
+def background_generate_timeline_and_checkpoints(task_id, title, due, twin_profile, ai_config, user_id='anonymous'):
     try:
         print(f"[Passive Charting] Starting AI timeline generation for task: {title}", flush=True)
-        ai_milestones = generate_dynamic_timeline(title, due, twin_profile, ai_config)
+        ai_milestones = generate_dynamic_timeline(title, due, twin_profile, ai_config, user_id=user_id)
         if not ai_milestones:
             print(f"[Passive Charting] AI timeline generation failed for task '{title}'. Retaining fallback.", flush=True)
             return
             
+        conn = get_db_conn()
+        cursor = conn.cursor()
+        cursor.execute("SELECT category FROM tasks WHERE id = ? AND user_id = ?", (task_id, user_id))
+        row = cursor.fetchone()
+        cat_obj = {}
+        if row and row[0]:
+            try:
+                cat_obj = json.loads(row[0])
+            except Exception:
+                pass
+        
+        ai_summary_text = ""
+        ai_summary_list = cat_obj.get('aiSummary', [])
+        if ai_summary_list and isinstance(ai_summary_list, list):
+            summary_parts = []
+            for s in ai_summary_list:
+                if isinstance(s, dict):
+                    summary_parts.append(s.get('content', ''))
+                elif isinstance(s, str):
+                    summary_parts.append(s)
+            if summary_parts:
+                ai_summary_text = "\nAI Summarizer Context:\n" + "\n".join(summary_parts)
+        
         for i, mile in enumerate(ai_milestones):
             mile_title = mile.get('title', '')
             mile_scheduled = mile.get('scheduledTime', '')
             
+            twin_context = f"\nOperator Profile: {twin_profile}" if twin_profile else ""
             prompt = f"""You are Chronos, a tactical AI deadline defense system.
 Task: "{title}" (importance: medium)
-Milestone: "{mile_title}" (scheduled: {mile_scheduled})
+Milestone: "{mile_title}" (scheduled: {mile_scheduled}){twin_context}{ai_summary_text}
 
 Generate EXACTLY 3 to 5 highly specific, actionable checkpoint steps for this milestone.
-Each checkpoint should be a concrete micro-task (not generic).
+Each checkpoint should be a concrete micro-task tailored to the operator's profile and skill level (not generic).
+Use the operator's background and behavioral patterns to suggest realistic, specific actions.
 Respond ONLY with a raw JSON array of objects with keys:
 - "title": short specific action (max 8 words)
-- "detail": one-sentence description of what exactly to do
+- "detail": one-sentence description of what exactly to do — be specific to this task and milestone
 - "estimatedMinutes": estimated minutes (integer, e.g. 15, 30, 45)
 No markdown, no explanation."""
             
@@ -1555,25 +2091,13 @@ No markdown, no explanation."""
                 ]
             mile['checkpoints'] = checkpoints
             
-        conn = get_db_conn()
-        cursor = conn.cursor()
-        cursor.execute("SELECT category FROM tasks WHERE id = ?", (task_id,))
-        row = cursor.fetchone()
-        
-        cat_obj = {}
-        if row and row[0]:
-            try:
-                cat_obj = json.loads(row[0])
-            except Exception:
-                pass
-                
         cat_obj['personalizedTimeline'] = True
         cat_obj['personalizationLog'] = [{"role": "assistant", "content": "Adaptive timeline generated passively."}]
         
         timeline_str = json.dumps(ai_milestones)
         category_str = json.dumps(cat_obj)
         
-        cursor.execute("UPDATE tasks SET timeline = ?, category = ? WHERE id = ?", (timeline_str, category_str, task_id))
+        cursor.execute("UPDATE tasks SET timeline = ?, category = ? WHERE id = ? AND user_id = ?", (timeline_str, category_str, task_id, user_id))
         conn.commit()
         conn.close()
         print(f"[Passive Charting] Successfully completed AI timeline for task: {title}", flush=True)
@@ -1582,17 +2106,18 @@ No markdown, no explanation."""
 
 @app.route('/api/tasks', methods=['GET'])
 def get_tasks():
-    return jsonify(load_tasks_db())
+    return jsonify(load_tasks_db(user_id=g.user_id))
 
 @app.route('/api/tasks', methods=['POST'])
 def add_task():
-    data = request.get_json()
+    data = request.get_json() or {}
     twin_profile = data.get('twinProfile', '')
     ai_config = data.get('aiConfig') or get_ai_config_from_db()
     
     task_id = str(uuid.uuid4())
     task = {
         'id': task_id,
+        'user_id': g.user_id,
         'title': data.get('title', 'Untitled Deadline'),
         'due': data.get('due'),
         'estimatedHours': float(data.get('estimatedHours', 2)),
@@ -1608,24 +2133,27 @@ def add_task():
     task['timeline'] = generate_fallback_timeline(task['title'], task['due'])
     
     # Run Risk/Intervention assessment
-    task = evaluate_task(task, twin_profile)
+    task = evaluate_task(task, twin_profile, user_id=g.user_id)
     
-    save_task_db(task)
+    save_task_db(task, user_id=g.user_id)
     
     # Spawn background thread to generate AI timeline & checkpoints passively
     threading.Thread(
         target=background_generate_timeline_and_checkpoints,
-        args=(task['id'], task['title'], task['due'], twin_profile, ai_config),
+        args=(task['id'], task['title'], task['due'], twin_profile, ai_config, g.user_id),
         daemon=True
     ).start()
+    
+    # Push to Google Calendar in background (non-blocking)
+    threading.Thread(target=push_task_to_google_calendar, args=(task,), daemon=True).start()
     
     return jsonify(task), 201
 
 
 @app.route('/api/tasks/<tid>', methods=['PUT'])
 def update_task(tid):
-    data = request.get_json()
-    tasks_list = load_tasks_db()
+    data = request.get_json() or {}
+    tasks_list = load_tasks_db(user_id=g.user_id)
     task = next((t for t in tasks_list if str(t['id']) == str(tid)), None)
     
     if not task:
@@ -1636,7 +2164,7 @@ def update_task(tid):
         is_completed = bool(data['completed'])
         if is_completed != was_completed:
             completed_change = 1 if is_completed else -1
-            update_twin_metrics(completed_change=completed_change)
+            update_twin_metrics(completed_change=completed_change, user_id=g.user_id)
             
         task['completed'] = is_completed
         events = task.get('events', [])
@@ -1659,14 +2187,30 @@ def update_task(tid):
         task['category'] = data['category']
         
     twin_profile = data.get('twinProfile', '')
-    task = evaluate_task(task, twin_profile)
+    task = evaluate_task(task, twin_profile, user_id=g.user_id)
     
-    save_task_db(task)
+    save_task_db(task, user_id=g.user_id)
+    
+    # Update Google Calendar event in background (non-blocking)
+    threading.Thread(target=update_google_calendar_event, args=(task,), daemon=True).start()
+    
     return jsonify(task)
 
 @app.route('/api/tasks/<tid>', methods=['DELETE'])
 def delete_task(tid):
-    delete_task_db(tid)
+    # Fetch category before deleting so we can remove the GCal event
+    try:
+        conn = get_db_conn()
+        cursor = conn.cursor()
+        cursor.execute("SELECT category FROM tasks WHERE id=? AND user_id=?", (str(tid), g.user_id))
+        row = cursor.fetchone()
+        conn.close()
+        cat_str = row[0] if row else ''
+    except Exception:
+        cat_str = ''
+    delete_task_db(tid, user_id=g.user_id)
+    # Delete Google Calendar event in background (non-blocking)
+    threading.Thread(target=delete_google_calendar_event, args=(tid, cat_str), daemon=True).start()
     return '', 204
 
 # --- Demo & Simulation Endpoints ---
@@ -1677,16 +2221,20 @@ def run_pulse():
     Reruns Risk Agent on all tasks using the current real time,
     simulating active observation.
     """
-    data = request.get_json() or {}
-    twin_profile = data.get('twinProfile', '')
-    
-    tasks_list = load_tasks_db()
-    updated = []
-    for t in tasks_list:
-        t_eval = evaluate_task(t, twin_profile, is_pulse=True)
-        save_task_db(t_eval)
-        updated.append(t_eval)
-    return jsonify(updated)
+    try:
+        data = request.get_json() or {}
+        twin_profile = data.get('twinProfile', '')
+        
+        tasks_list = load_tasks_db(user_id=g.user_id)
+        updated = []
+        for t in tasks_list:
+            t_eval = evaluate_task(t, twin_profile, is_pulse=True, user_id=g.user_id)
+            save_task_db(t_eval, user_id=g.user_id)
+            updated.append(t_eval)
+        return jsonify(updated)
+    except Exception as e:
+        print(f"[pulse] Error: {e}", flush=True)
+        return jsonify({"error": "Pulse evaluation failed", "detail": str(e)}), 500
 
 @app.route('/api/tasks/simulate/time', methods=['POST'])
 def simulate_time_passage():
@@ -1697,7 +2245,7 @@ def simulate_time_passage():
     data = request.get_json() or {}
     twin_profile = data.get('twinProfile', '')
     
-    tasks_list = load_tasks_db()
+    tasks_list = load_tasks_db(user_id=g.user_id)
     updated = []
     for t in tasks_list:
         due_str = t.get('due')
@@ -1708,7 +2256,7 @@ def simulate_time_passage():
             t['due'] = new_due_dt.isoformat().replace('+00:00', 'Z')
             
             t['delayCount'] = t.get('delayCount', 0) + 1
-            t_eval = evaluate_task(t, twin_profile)
+            t_eval = evaluate_task(t, twin_profile, user_id=g.user_id)
             
             events = t_eval.get('events', [])
             events.append({
@@ -1718,7 +2266,7 @@ def simulate_time_passage():
             })
             t_eval['events'] = events
             
-            save_task_db(t_eval)
+            save_task_db(t_eval, user_id=g.user_id)
             updated.append(t_eval)
         else:
             updated.append(t)
@@ -1734,19 +2282,20 @@ def simulate_collapse():
     data = request.get_json() or {}
     twin_profile = data.get('twinProfile', '')
     
-    tasks_list = load_tasks_db()
+    tasks_list = load_tasks_db(user_id=g.user_id)
     if not tasks_list:
         task_id = str(uuid.uuid4())
         mock_due = (datetime.datetime.now() + datetime.timedelta(hours=1)).isoformat() + "Z"
         task = {
             'id': task_id,
+            'user_id': g.user_id,
             'title': 'Hackathon Demo Submission',
             'due': mock_due,
             'estimatedHours': 6.0,
             'importance': 'high',
             'completed': False,
             'created': datetime.datetime.now().isoformat(),
-            'timeline': generate_fallback_timeline('Hackathon Demo Submission', twin_profile)
+            'timeline': generate_fallback_timeline('Hackathon Demo Submission', mock_due)
         }
         tasks_list.append(task)
         
@@ -1775,7 +2324,7 @@ def simulate_collapse():
             'message': 'Forced collapse simulation triggered by Operator. Active Intervention System voice warning broadcast triggered.'
         })
         t['events'] = events
-        save_task_db(t)
+        save_task_db(t, user_id=g.user_id)
         send_phone_notification(
             "Chronos CRITICAL: Deadline Collapse Detected (Simulated)",
             f"Task '{t.get('title')}' has collapsed! The deadline has passed."
@@ -1791,14 +2340,13 @@ def acknowledge_collapse(tid):
     User acknowledges a collapsed (dead) task.
     Deletes the task and increments the twin's failureCount (Nexus Events).
     """
-    delete_task_db(tid)
-    update_twin_metrics(failure_change=1)
+    delete_task_db(tid, user_id=g.user_id)
+    update_twin_metrics(failure_change=1, user_id=g.user_id)
     
-    settings_file = os.path.join(os.path.dirname(__file__), 'settings.json')
     conn = get_db_conn()
     conn.row_factory = sqlite3.Row
     cursor = conn.cursor()
-    cursor.execute("SELECT * FROM settings WHERE id = 'active_operator'")
+    cursor.execute("SELECT * FROM settings WHERE id = 'active_operator' AND user_id = ?", (g.user_id,))
     row = cursor.fetchone()
     conn.close()
     
@@ -1813,7 +2361,7 @@ def rescue_task(tid):
     Recovery Agent: Rebuilds timeline with AI-generated recovery phases, calculates
     AI-driven Post-Recovery Success Forecast, and compiles AI checklist resources.
     """
-    tasks_list = load_tasks_db()
+    tasks_list = load_tasks_db(user_id=g.user_id)
     task = next((t for t in tasks_list if str(t['id']) == str(tid)), None)
     if not task:
         return jsonify({'error': 'Task not found'}), 404
@@ -1992,7 +2540,7 @@ Respond ONLY with the raw JSON object. No markdown, no explanation."""
     })
     task['events'] = events
 
-    save_task_db(task)
+    save_task_db(task, user_id=g.user_id)
     return jsonify(task)
 
 
@@ -2002,7 +2550,7 @@ def complete_sprint(tid):
     Finalizes a task or checkpoint sprint, recording actual vs estimated hours,
     triggering the AI twin to analyze efficiency patterns and adjust settings.
     """
-    tasks_list = load_tasks_db()
+    tasks_list = load_tasks_db(user_id=g.user_id)
     task = next((t for t in tasks_list if str(t['id']) == str(tid)), None)
     if not task:
         return jsonify({'error': 'Task not found'}), 404
@@ -2018,12 +2566,10 @@ def complete_sprint(tid):
     if task.get('category'):
         try:
             category_data = json.loads(task['category'])
+            if not isinstance(category_data, dict):
+                category_data = {"aiSummary": category_data, "completedCheckpoints": []}
         except Exception:
-            try:
-                chat_history = json.loads(task['category'])
-                category_data = {"aiSummary": chat_history, "completedCheckpoints": []}
-            except Exception:
-                category_data = {"aiSummary": [], "completedCheckpoints": []}
+            category_data = {"aiSummary": [], "completedCheckpoints": []}
     else:
         category_data = {"aiSummary": [], "completedCheckpoints": []}
         
@@ -2034,7 +2580,7 @@ def complete_sprint(tid):
     conn = get_db_conn()
     conn.row_factory = sqlite3.Row
     cursor = conn.cursor()
-    cursor.execute("SELECT twinProfile, procrastinationRating FROM settings WHERE id = 'active_operator'")
+    cursor.execute("SELECT twinProfile, procrastinationRating FROM settings WHERE id = 'active_operator' AND user_id = ?", (g.user_id,))
     row = cursor.fetchone()
     conn.close()
     
@@ -2074,7 +2620,7 @@ def complete_sprint(tid):
         task['events'] = events
         
         # Update settings twin metrics
-        update_twin_metrics(completed_change=1)
+        update_twin_metrics(completed_change=1, user_id=g.user_id)
         
     # AI Learning and Optimizing:
     # Query AI to update user's digital twin profile based on execution performance!
@@ -2130,14 +2676,14 @@ def complete_sprint(tid):
                 # Save new settings to DB
                 conn = get_db_conn()
                 cursor = conn.cursor()
-                cursor.execute("UPDATE settings SET twinProfile = ?, procrastinationRating = ? WHERE id = 'active_operator'", (new_twin_profile, new_procrastination_rating))
+                cursor.execute("UPDATE settings SET twinProfile = ?, procrastinationRating = ? WHERE id = 'active_operator' AND user_id = ?", (new_twin_profile, new_procrastination_rating, g.user_id))
                 conn.commit()
                 conn.close()
         except Exception as e:
             print(f"[Complete Sprint AI learning failed] {e}", flush=True)
             
     # Save task
-    save_task_db(task)
+    save_task_db(task, user_id=g.user_id)
     
     return jsonify({
         "success": True, 
@@ -2156,10 +2702,28 @@ def recovery_status():
     if not task_id:
         return jsonify({'error': 'taskId is required'}), 400
         
-    tasks_list = load_tasks_db()
+    tasks_list = load_tasks_db(user_id=g.user_id)
     task = next((t for t in tasks_list if str(t['id']) == str(task_id)), None)
     if not task:
-        return jsonify({'error': 'Task not found'}), 404
+        # Task not found (e.g. after page refresh before DB sync) — return a generic fallback
+        # so the RecoveryCommandCenter can still load instead of showing a 404 error.
+        return jsonify({
+            'severity': 'HIGH',
+            'severityColor': 'text-orange-400',
+            'temporalDebtHours': 0,
+            'temporalDebtDays': 0,
+            'riskBefore': 50,
+            'riskAfter': 22,
+            'progress': 0,
+            'checklist': [
+                'Open your primary workspace and clear all distractions',
+                'Write the minimum viable outline for this task',
+                'Set a 25-minute focused sprint timer and begin immediately',
+                'At the halfway mark, re-evaluate scope and cut non-essential parts',
+                'Submit a complete (not perfect) version before the deadline'
+            ]
+        })
+
         
     # Re-calculate work hours left to get current temporal debt
     due_str = task.get('due')
@@ -2215,14 +2779,19 @@ def recovery_status():
     risk_before = 100 - survival_before
     risk_after = 100 - task.get('survivalScore', 78)
     
-    # Checklist
+    # Checklist - generate task-specific recovery plan
     rescue_resources = task.get('rescueResources') or {}
-    checklist = rescue_resources.get('checklist') or [
-        "Review project requirements",
-        "Draft preliminary outline",
-        "Build main feature set",
-        "Finalize and test execution"
-    ]
+    checklist = rescue_resources.get('checklist')
+    if not checklist:
+        task_title = task.get('title', 'Unknown Task')
+        est_hours = task.get('estimatedHours', 2)
+        checklist = [
+            f"Analyze remaining work for '{task_title}' ({est_hours}h estimated)",
+            f"Break down '{task_title}' into 2-3 micro-steps for immediate execution",
+            f"Block 90-minute focused window for '{task_title}' core effort",
+            f"Skip non-essential refinements to meet deadline on '{task_title}'",
+            f"Submit '{task_title}' at minimum viable quality"
+        ]
     
     return jsonify({
         'severity': severity,
@@ -2242,7 +2811,7 @@ def recovery_complete():
     if not task_id:
         return jsonify({'error': 'taskId is required'}), 400
         
-    tasks_list = load_tasks_db()
+    tasks_list = load_tasks_db(user_id=g.user_id)
     task = next((t for t in tasks_list if str(t['id']) == str(task_id)), None)
     if not task:
         return jsonify({'error': 'Task not found'}), 404
@@ -2258,14 +2827,14 @@ def recovery_complete():
     recovered_hours = float(task.get('estimatedHours', 2))
     
     # Update SQLite twin metrics
-    update_twin_metrics(completed_change=1, recovered_hours_change=recovered_hours)
+    update_twin_metrics(completed_change=1, recovered_hours_change=recovered_hours, user_id=g.user_id)
     
     # Calculate streak from SQLite settings
     streak_count = 1
     try:
         conn = get_db_conn()
         cursor = conn.cursor()
-        cursor.execute("SELECT streakCount FROM settings WHERE id = 'active_operator'")
+        cursor.execute("SELECT streakCount FROM settings WHERE id = 'active_operator' AND user_id = ?", (g.user_id,))
         row = cursor.fetchone()
         conn.close()
         if row:
@@ -2291,7 +2860,7 @@ def recovery_complete():
     })
     task['events'] = events
     
-    save_task_db(task)
+    save_task_db(task, user_id=g.user_id)
     
     return jsonify({
         'success': True,
@@ -2304,7 +2873,7 @@ def recovery_complete():
 
 @app.route('/api/ai/chat', methods=['POST'])
 def ai_chat():
-    data = request.get_json()
+    data = request.get_json() or {}
     provider = data.get('provider', 'gemini')
     api_url = data.get('apiUrl')
     api_key = data.get('apiKey')
@@ -2337,7 +2906,7 @@ def ai_chat():
                     })
             
             gemini_model = model or 'gemini-1.5-flash'
-            url = f"https://generativelanguage.googleapis.com/v1beta/models/{gemini_model}:generateContent?key={api_key}"
+            url = f"https://generativelanguage.googleapis.com/v1beta/models/{gemini_model}:generateContent"
             
             payload = {"contents": contents}
             if system_instruction:
@@ -2345,7 +2914,7 @@ def ai_chat():
             
             payload["generationConfig"] = {"temperature": 0.7}
             
-            response = requests.post(url, json=payload, timeout=90)
+            response = requests.post(url, json=payload, headers={"X-Goog-Api-Key": api_key, "Content-Type": "application/json"}, timeout=90)
             response.raise_for_status()
             res_data = response.json()
             
@@ -2357,13 +2926,13 @@ def ai_chat():
             return jsonify({'content': content})
             
         elif provider == 'nvidia':
-            url = f"{api_url or 'https://integrate.api.nvidia.com/v1'}/chat/completions"
+            url = f"{api_url.rstrip('/') if api_url else 'https://integrate.api.nvidia.com/v1'}/chat/completions"
             headers = {
                 "Authorization": f"Bearer {api_key}",
                 "Content-Type": "application/json"
             }
             payload = {
-                "model": model or "meta/llama-3-70b-instruct",
+                "model": model or "meta/llama-3.1-8b-instruct",
                 "messages": messages,
                 "temperature": 0.5,
                 "max_tokens": 1024,
@@ -2400,6 +2969,55 @@ def ai_chat():
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
+@app.route('/api/ai/chat/stream', methods=['POST'])
+def ai_chat_stream():
+    data = request.get_json() or {}
+    provider = data.get('provider', 'nvidia')
+    api_url = data.get('apiUrl')
+    api_key = data.get('apiKey')
+    model = data.get('model')
+    messages = data.get('messages', [])
+
+    if provider != 'nvidia':
+        return jsonify({'error': 'Streaming is only supported with NVIDIA provider'}), 400
+    if not api_key:
+        return jsonify({'error': 'API key is required'}), 400
+
+    url = f"{api_url.rstrip('/') if api_url else 'https://integrate.api.nvidia.com/v1'}/chat/completions"
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json"
+    }
+    payload = {
+        "model": model or "meta/llama-3.1-8b-instruct",
+        "messages": messages,
+        "temperature": 0.5,
+        "max_tokens": 1024,
+        "stream": True
+    }
+
+    def generate():
+        try:
+            resp = requests.post(url, json=payload, headers=headers, stream=True, timeout=120)
+            resp.raise_for_status()
+            for line in resp.iter_lines():
+                if not line:
+                    continue
+                decoded = line.decode('utf-8')
+                if decoded.startswith('data: '):
+                    chunk = decoded[6:]
+                    if chunk.strip() == '[DONE]':
+                        break
+                    yield f"data: {chunk}\n\n"
+        except Exception as e:
+            yield f"data: {{\"error\": \"{str(e)}\"}}\n\n"
+        yield "data: [DONE]\n\n"
+
+    return Response(generate(), mimetype='text/event-stream', headers={
+        'Cache-Control': 'no-cache',
+        'X-Accel-Buffering': 'no',
+    })
+
 @app.route('/api/voice/query', methods=['POST'])
 def voice_query():
     data = request.get_json() or {}
@@ -2413,7 +3031,7 @@ def voice_query():
         conn = get_db_conn()
         conn.row_factory = sqlite3.Row
         cursor = conn.cursor()
-        cursor.execute("SELECT * FROM settings WHERE id = 'active_operator'")
+        cursor.execute("SELECT * FROM settings WHERE id = 'active_operator' AND user_id = ?", (g.user_id,))
         row = cursor.fetchone()
         conn.close()
         
@@ -2422,7 +3040,7 @@ def voice_query():
             username = row_dict.get("username", "operator")
             twin_profile = row_dict.get("twinProfile", "")
             
-        tasks = load_tasks_db()
+        tasks = load_tasks_db(user_id=g.user_id)
         active_tasks = [t for t in tasks if not t.get('completed', False)]
         tasks_info = ""
         if active_tasks:
@@ -2480,12 +3098,20 @@ def voice_query():
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
-@app.route('/api/ai/models', methods=['GET'])
+@app.route('/api/ai/models', methods=['GET', 'POST'])
 def list_models():
-    provider = request.args.get('provider', 'gemini')
-    api_url = request.args.get('apiUrl')
-    api_key = request.args.get('apiKey')
-    print(f"[DEBUG MODEL LIST] provider={provider}, api_url={api_url}, api_key={api_key}", flush=True)
+    if request.method == 'POST':
+        body = request.get_json() or {}
+        provider = body.get('provider', 'gemini')
+        api_url = body.get('apiUrl', '')
+        api_key = body.get('apiKey', '')
+    else:
+        provider = request.args.get('provider', 'gemini')
+        api_url = request.headers.get('X-Api-Url', '')
+        api_key = request.headers.get('X-Api-Key', '')
+        # Fallback to query params for backward compat (with deprecation notice)
+        if not api_key:
+            api_key = request.args.get('apiKey', '')
     
     if provider == 'gemini':
         default_gemini_models = [
@@ -2497,9 +3123,9 @@ def list_models():
         if not api_key or not api_key.strip():
             return jsonify({'models': default_gemini_models, 'offline': True})
             
-        url = f"https://generativelanguage.googleapis.com/v1beta/models?key={api_key.strip()}"
+        url = "https://generativelanguage.googleapis.com/v1beta/models"
         try:
-            response = requests.get(url, timeout=3)
+            response = requests.get(url, headers={"X-Goog-Api-Key": api_key.strip()}, timeout=3)
             if response.status_code == 200:
                 data = response.json()
                 models = [m['name'].split('/')[-1] for m in data.get('models', []) if 'gemini' in m.get('name', '').lower()]
@@ -2511,33 +3137,12 @@ def list_models():
         return jsonify({'models': default_gemini_models, 'offline': True})
         
     elif provider == 'nvidia':
-        default_nim_models = [
-            'meta/llama-3-70b-instruct',
-            'meta/llama-3.1-70b-instruct',
-            'meta/llama-3.1-405b-instruct',
-            'nvidia/llama-3.1-nemotron-70b-instruct',
-            'mistralai/mixtral-8x22b-instruct-v0.1',
-            'microsoft/phi-3-medium-128k-instruct'
+        # Whitelisted models only — no live API fetch to prevent overrides
+        nim_models = [
+            'meta/llama-3.1-8b-instruct',
+            'meta/llama-3.3-70b-instruct'
         ]
-        if api_key:
-            url = f"{(api_url or 'https://integrate.api.nvidia.com/v1').rstrip('/')}/models"
-            headers = {
-                "Authorization": f"Bearer {api_key}",
-                "Content-Type": "application/json"
-            }
-            try:
-                response = requests.get(url, headers=headers, timeout=4)
-                if response.status_code == 200:
-                    data = response.json()
-                    models = [m['id'] for m in data.get('data', [])]
-                    chat_models = [m for m in models if 'instruct' in m.lower() or 'chat' in m.lower()]
-                    if chat_models:
-                        return jsonify({'models': chat_models, 'offline': False})
-                    elif models:
-                        return jsonify({'models': models, 'offline': False})
-            except Exception:
-                pass
-        return jsonify({'models': default_nim_models, 'offline': True})
+        return jsonify({'models': nim_models, 'offline': False})
 
     elif provider == 'custom':
         if not api_url:
@@ -2563,15 +3168,20 @@ def list_models():
 def voice_events():
     def event_stream():
         q = queue.Queue()
-        voice_clients.append(q)
+        with voice_clients_lock:
+            voice_clients.append(q)
         # Send an initial ping to establish connection
         q.put({"status": "connected"})
         try:
             while True:
                 data = q.get()
                 yield f"data: {json.dumps(data)}\n\n"
-        except GeneratorExit:
-            voice_clients.remove(q)
+        finally:
+            with voice_clients_lock:
+                try:
+                    voice_clients.remove(q)
+                except ValueError:
+                    pass
     return Response(event_stream(), mimetype="text/event-stream")
 
 @app.route('/api/voice/trigger', methods=['POST'])
@@ -2598,7 +3208,7 @@ def voice_briefing():
         
     globals()['last_briefing_date'] = current_date
     
-    tasks = load_tasks_db()
+    tasks = load_tasks_db(user_id=g.user_id)
     active_tasks = [t for t in tasks if not t.get('completed', False)]
     count = len(active_tasks)
     
@@ -2649,14 +3259,9 @@ def voice_speak():
 @app.route('/api/voice/stop', methods=['POST'])
 def voice_stop():
     global is_speaking
-    is_speaking = False
-    # 1. Stop current audio playback
-    try:
-        sd.stop()
-    except Exception as e:
-        print(f"[Voice Stop Error] Failed to stop sounddevice: {e}")
-        
-    # 2. Clear speech queue
+    with is_speaking_lock:
+        is_speaking = False
+    # Clear speech queue
     with speech_queue.mutex:
         speech_queue.queue.clear()
         
@@ -2686,49 +3291,20 @@ def voice_status():
         "is_speaking": is_speaking
     })
 
-@app.route('/api/voice/start-local-daemon', methods=['POST'])
-def start_local_daemon():
-    try:
-        import subprocess
-        import sys
-        
-        # Check standard locations for the compiled EXE file
-        user_profile = os.environ.get("USERPROFILE", os.path.expanduser("~"))
-        search_paths = [
-            os.path.join(user_profile, "Desktop", "chronos_voice_daemon.exe"),
-            os.path.join(user_profile, "Downloads", "chronos_voice_daemon.exe"),
-            os.path.join(os.path.dirname(__file__), "chronos_voice_daemon.exe"),
-            os.path.join(os.path.dirname(__file__), "..", "chronos_voice_daemon.exe"),
-            os.path.join(os.path.dirname(__file__), "..", "dist", "chronos_voice_daemon.exe"),
-            os.path.join(os.path.dirname(__file__), "frontend", "chronos_voice_daemon.exe"),
-            os.path.join(os.path.dirname(__file__), "..", "frontend", "chronos_voice_daemon.exe")
-        ]
-        
-        exe_path = None
-        for path in search_paths:
-            if os.path.exists(path):
-                exe_path = path
-                break
-                
-        if exe_path:
-            print(f"[Voice Automation] Launching local exe: {exe_path}", flush=True)
-            subprocess.Popen([exe_path], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            return jsonify({"status": "spawning", "method": "exe"})
-            
-        # Fallback to python script
-        script_path = os.path.join(os.path.dirname(__file__), 'voice_engine', 'voice_daemon_client.py')
-        if not os.path.exists(script_path):
-            script_path = os.path.join(os.path.dirname(__file__), '..', 'voice_engine', 'voice_daemon_client.py')
-            
-        if os.path.exists(script_path):
-            print(f"[Voice Automation] Launching local script: {script_path}", flush=True)
-            subprocess.Popen([sys.executable, script_path], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            return jsonify({"status": "spawning", "method": "script"})
-        else:
-            return jsonify({"error": "No voice daemon executable or script found. Please download the voice daemon below."}), 404
-    except Exception as e:
-        print(f"[Voice Automation Error] Failed to launch daemon: {e}", flush=True)
-        return jsonify({"error": str(e)}), 500
+@app.route('/api/voice/config', methods=['GET'])
+def voice_config():
+    """Returns config the voice daemon needs: Google API key + backend URL."""
+    settings = {}
+    settings_file = os.path.join(os.path.dirname(__file__), 'settings.json')
+    if os.path.exists(settings_file):
+        try:
+            with open(settings_file, 'r') as f:
+                settings = json.load(f)
+        except Exception:
+            pass
+    google_api_key = settings.get('googleApiKey', os.environ.get('GOOGLE_API_KEY', ''))
+    backend_url = os.environ.get('BACKEND_URL', request.host_url.rstrip('/'))
+    return jsonify({"googleApiKey": google_api_key, "backendUrl": backend_url, "userId": g.user_id})
 
 @app.route('/api/voice/mute', methods=['POST'])
 def mute_voice():
@@ -2760,6 +3336,182 @@ def mute_status():
         "remaining_seconds": remaining
     })
 
+@app.route('/api/health', methods=['GET'])
+def health_check():
+    ai_online = False
+    try:
+        settings_file = os.path.join(os.path.dirname(__file__), 'settings.json')
+        if os.path.exists(settings_file):
+            with open(settings_file, 'r') as f:
+                cfg = json.load(f)
+            api_key = cfg.get('aiApiKey', '')
+            if api_key:
+                ai_online = True
+    except Exception:
+        pass
+    db_online = True
+    try:
+        conn = get_db_conn()
+        conn.execute("SELECT 1")
+        conn.close()
+    except Exception:
+        db_online = False
+    voice_online = (time.time() - last_voice_link_ping) < 40.0 if last_voice_link_ping > 0 else False
+    return jsonify({
+        "ai_online": ai_online,
+        "db_online": db_online,
+        "voice_online": voice_online
+    })
+
+@app.route('/api/bootstrap', methods=['GET'])
+def bootstrap():
+    user_id = g.user_id
+    settings_data = {}
+    try:
+        conn = get_db_conn()
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM settings WHERE id = 'active_operator' AND user_id = ?", (user_id,))
+        row = cursor.fetchone()
+        conn.close()
+        if row:
+            settings_data = dict(row)
+        settings_file = os.path.join(os.path.dirname(__file__), 'settings.json')
+        if os.path.exists(settings_file):
+            with open(settings_file, 'r') as f:
+                file_settings = json.load(f)
+            for k, v in file_settings.items():
+                if k not in settings_data or settings_data[k] is None or settings_data[k] == '':
+                    settings_data[k] = v
+    except Exception:
+        pass
+
+    tasks = load_tasks_db(user_id=user_id)
+
+    memory = get_memory_summary(user_id)
+
+    ai_online = False
+    try:
+        api_key = settings_data.get('aiApiKey', '')
+        if api_key:
+            ai_online = True
+    except Exception:
+        pass
+    db_online = True
+    voice_online = (time.time() - last_voice_link_ping) < 40.0 if last_voice_link_ping > 0 else False
+    health = {"ai_online": ai_online, "db_online": db_online, "voice_online": voice_online}
+
+    profile = {
+        "username": settings_data.get('username', 'user'),
+        "twinProfile": settings_data.get('twinProfile', ''),
+        "procrastinationRating": settings_data.get('procrastinationRating', 8.0),
+        "attentionCycle": settings_data.get('attentionCycle', ''),
+        "stressResponse": settings_data.get('stressResponse', ''),
+        "executionCount": settings_data.get('executionCount', 0),
+        "failureCount": settings_data.get('failureCount', 0),
+        "streakCount": settings_data.get('streakCount', 0),
+        "totalRecoveredHours": settings_data.get('totalRecoveredHours', 0.0),
+        "aiProvider": settings_data.get('aiProvider', 'gemini'),
+        "aiModel": settings_data.get('aiModel', 'gemini-1.5-flash'),
+    }
+
+    return jsonify({
+        "settings": settings_data,
+        "tasks": tasks,
+        "memory": memory,
+        "health": health,
+        "profile": profile,
+    })
+
+
+# ── Memory API ─────────────────────────────────────────────────
+
+@app.route('/api/memory', methods=['GET'])
+def memory_get_all():
+    layer = request.args.get('layer')
+    return jsonify(get_memory(g.user_id, layer))
+
+
+@app.route('/api/memory/<layer>', methods=['POST'])
+def memory_upsert(layer):
+    if layer not in ALL_LAYERS:
+        return jsonify({"error": f"Invalid layer. Must be one of: {', '.join(ALL_LAYERS)}"}), 400
+    data = request.get_json() or {}
+    key = data.get('key')
+    value = data.get('value')
+    source = data.get('source', 'user')
+    if not key:
+        return jsonify({"error": "key is required"}), 400
+    result = upsert_memory(g.user_id, layer, key, value, source)
+    return jsonify(result)
+
+
+@app.route('/api/memory/<layer>/<key>', methods=['DELETE'])
+def memory_delete(layer, key):
+    if layer not in ALL_LAYERS:
+        return jsonify({"error": "Invalid layer"}), 400
+    delete_memory(g.user_id, layer, key)
+    return '', 204
+
+
+@app.route('/api/memory/timeline', methods=['GET'])
+def memory_timeline():
+    limit = int(request.args.get('limit', 50))
+    offset = int(request.args.get('offset', 0))
+    return jsonify(get_timeline(g.user_id, limit, offset))
+
+
+@app.route('/api/memory/learn', methods=['POST'])
+def memory_learn():
+    data = request.get_json() or {}
+    text = data.get('text', '').strip()
+    if not text:
+        return jsonify({"error": "text is required"}), 400
+    source = data.get('source', 'conversation')
+
+    ai_config = get_ai_config_from_db()
+    if ai_config and ai_config.get('apiKey'):
+        prompt = (
+            f"Analyze this user statement and extract up to 3 important memory entries. "
+            f"For each entry, determine the appropriate memory layer from: "
+            f"{', '.join(ALL_LAYERS)}. "
+            f"Output a JSON array of objects with keys: 'layer', 'key', 'value'. "
+            f"Only include truly meaningful information (preferences, goals, patterns, facts). "
+            f"Respond with ONLY the JSON array, no other text.\n\n"
+            f"User statement: {text}"
+        )
+        try:
+            reply = query_ai_direct(
+                ai_config.get('provider', 'gemini'),
+                ai_config.get('apiUrl', ''),
+                ai_config.get('apiKey', ''),
+                ai_config.get('model', 'gemini-1.5-flash'),
+                [{"role": "user", "content": prompt}],
+                timeout=10
+            )
+            if reply:
+                content = reply.strip()
+                if '```' in content:
+                    parts = content.split('```')
+                    for part in parts:
+                        s = part.strip().replace('json', '').strip()
+                        if s.startswith('['):
+                            content = s
+                            break
+                entries = json.loads(content)
+                if isinstance(entries, list):
+                    saved = []
+                    for entry in entries:
+                        if entry.get('layer') in ALL_LAYERS and entry.get('key'):
+                            result = upsert_memory(g.user_id, entry['layer'], entry['key'], entry.get('value', ''), source)
+                            saved.append(result)
+                    return jsonify({"saved": saved, "count": len(saved)})
+        except Exception as e:
+            print(f"[Memory Learn] AI extraction failed: {e}", flush=True)
+
+    return jsonify({"saved": [], "count": 0})
+
+
 @app.route('/api/phone/test', methods=['POST'])
 def test_phone_notification():
     data = request.get_json() or {}
@@ -2790,6 +3542,29 @@ def test_phone_notification():
     except Exception as e:
         return jsonify({"error": f"Network error: {str(e)}"}), 500
 
+@app.route('/api/sprint/status', methods=['POST'])
+def update_sprint_status():
+    data = request.get_json() or {}
+    uid = getattr(g, 'user_id', 'anonymous')
+    with active_sprints_lock:
+        active_sprints[uid] = {
+            "task_id": data.get("taskId"),
+            "checkpoint_id": data.get("checkpointId"),
+            "active": bool(data.get("active", False)),
+            "paused": bool(data.get("paused", False)),
+            "duration": int(data.get("duration", 0)),
+            "seconds_left": int(data.get("secondsLeft", 0)),
+            "last_updated": time.time()
+        }
+    return jsonify({"status": "updated"})
+
+@app.route('/api/sprint/status', methods=['GET'])
+def get_sprint_status():
+    uid = getattr(g, 'user_id', 'anonymous')
+    with active_sprints_lock:
+        sprint = active_sprints.get(uid, {"active": False})
+    return jsonify(sprint)
+
 @app.route('/api/settings', methods=['GET', 'POST'])
 def handle_settings():
     settings_file = os.path.join(os.path.dirname(__file__), 'settings.json')
@@ -2801,7 +3576,7 @@ def handle_settings():
         data = request.get_json() or {}
         
         # Load existing row first to merge fields (e.g. keep streak/counts if not passed)
-        cursor.execute("SELECT * FROM settings WHERE id = 'active_operator'")
+        cursor.execute("SELECT * FROM settings WHERE id = 'active_operator' AND user_id = ?", (g.user_id,))
         row = cursor.fetchone()
         
         username = data.get('username', row['username'] if row else 'user')
@@ -2809,23 +3584,32 @@ def handle_settings():
         sleep_end = int(data.get('sleepEnd', row['sleepEnd'] if row else 7))
         ntfy_topic = data.get('ntfyTopic', row['ntfyTopic'] if row else 'chronos-alerts-user')
         twin_profile = data.get('twinProfile', row['twinProfile'] if row else '')
-        procrastination_rating = float(data.get('procrastinationRating', row['procrastinationRating'] if row else 8.0))
-        attention_cycle = data.get('attentionCycle', row['attentionCycle'] if row else 'Focus cycles peak late evening')
-        stress_response = data.get('stressResponse', row['stressResponse'] if row else 'Postpones tasks under high workload pressure')
+        procrastination_rating = data.get('procrastinationRating')
+        if procrastination_rating is not None:
+            procrastination_rating = float(procrastination_rating)
+        elif row and row['procrastinationRating'] is not None:
+            procrastination_rating = float(row['procrastinationRating'])
+        else:
+            procrastination_rating = None
+        
+        attention_cycle = data.get('attentionCycle') or (row.get('attentionCycle') if row else None)
+        stress_response = data.get('stressResponse') or (row.get('stressResponse') if row else None)
         
         execution_count = int(data.get('executionCount', row['executionCount'] if row else 0))
         failure_count = int(data.get('failureCount', row['failureCount'] if row else 0))
         streak_count = int(data.get('streakCount', row['streakCount'] if row else 0))
         total_recovered_hours = float(data.get('totalRecoveredHours', row['totalRecoveredHours'] if row else 0.0))
+        onboarding_completed = int(bool(data.get('onboardingComplete', row.get('onboarding_completed', 0) if row else 0)))
         
         cursor.execute("""
         INSERT INTO settings (
-            id, username, sleepStart, sleepEnd, ntfyTopic, twinProfile,
+            id, user_id, username, sleepStart, sleepEnd, ntfyTopic, twinProfile,
             procrastinationRating, attentionCycle, stressResponse,
-            executionCount, failureCount, streakCount, totalRecoveredHours
+            executionCount, failureCount, streakCount, totalRecoveredHours,
+            onboarding_completed
         ) VALUES (
-            'active_operator', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
-        ) ON CONFLICT(id) DO UPDATE SET
+            'active_operator', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+        ) ON CONFLICT(id, user_id) DO UPDATE SET
             username=excluded.username,
             sleepStart=excluded.sleepStart,
             sleepEnd=excluded.sleepEnd,
@@ -2837,17 +3621,20 @@ def handle_settings():
             executionCount=excluded.executionCount,
             failureCount=excluded.failureCount,
             streakCount=excluded.streakCount,
-            totalRecoveredHours=excluded.totalRecoveredHours
+            totalRecoveredHours=excluded.totalRecoveredHours,
+            onboarding_completed=excluded.onboarding_completed
         """, (
-            username, sleep_start, sleep_end, ntfy_topic, twin_profile,
+            g.user_id, username, sleep_start, sleep_end, ntfy_topic, twin_profile,
             procrastination_rating, attention_cycle, stress_response,
-            execution_count, failure_count, streak_count, total_recovered_hours
+            execution_count, failure_count, streak_count, total_recovered_hours,
+            onboarding_completed
         ))
         conn.commit()
         conn.close()
         
         # Keep settings.json backup updated (also persist AI config if provided)
         data_to_save = {
+            "user_id": g.user_id,
             "username": username,
             "sleepStart": sleep_start,
             "sleepEnd": sleep_end,
@@ -2859,7 +3646,8 @@ def handle_settings():
             "executionCount": execution_count,
             "failureCount": failure_count,
             "streakCount": streak_count,
-            "totalRecoveredHours": total_recovered_hours
+            "totalRecoveredHours": total_recovered_hours,
+            "onboarding_completed": onboarding_completed
         }
         # Persist AI config fields if passed
         for ai_field in ('aiProvider', 'aiApiUrl', 'aiApiKey', 'aiModel'):
@@ -2880,10 +3668,11 @@ def handle_settings():
         except Exception:
             pass
             
+        _gcs_backup_async()
         return jsonify(data_to_save)
 
     else:
-        cursor.execute("SELECT * FROM settings WHERE id = 'active_operator'")
+        cursor.execute("SELECT * FROM settings WHERE id = 'active_operator' AND user_id = ?", (g.user_id,))
         row = cursor.fetchone()
         conn.close()
         res_data = dict(row) if row else {}
@@ -2900,8 +3689,10 @@ def handle_settings():
                 pass
         
         if res_data:
+            if 'onboarding_completed' not in res_data:
+                res_data['onboarding_completed'] = 0
             return jsonify(res_data)
-        return jsonify({"username": "user", "twinProfile": "", "sleepStart": 23, "sleepEnd": 7, "ntfyTopic": "chronos-alerts-user", "procrastinationRating": 8.0})
+        return jsonify({"username": "user", "twinProfile": "", "sleepStart": 23, "sleepEnd": 7, "ntfyTopic": "chronos-alerts-user", "procrastinationRating": None, "attentionCycle": None, "stressResponse": None, "onboarding_completed": 0})
 
 @app.route('/api/tasks/presets/load', methods=['POST'])
 def load_presets():
@@ -2910,7 +3701,7 @@ def load_presets():
     # Mocking: Hackathon Project, Cloud Infrastructure, Pitch Deck
     conn = get_db_conn()
     cursor = conn.cursor()
-    cursor.execute("DELETE FROM tasks")
+    cursor.execute("DELETE FROM tasks WHERE user_id = ?", (g.user_id,))
     conn.commit()
     conn.close()
     
@@ -2956,8 +3747,9 @@ def load_presets():
     ]
     
     for t in presets:
-        t_eval = evaluate_task(t)
-        save_task_db(t_eval)
+        t['user_id'] = g.user_id
+        t_eval = evaluate_task(t, user_id=g.user_id)
+        save_task_db(t_eval, user_id=g.user_id)
         
     return jsonify({"status": "presets_loaded", "count": len(presets)})
 
@@ -2980,13 +3772,7 @@ def get_google_oauth_credentials():
         except Exception:
             pass
             
-    # Obfuscated default fallback split into parts to prevent Git push secret scanning blocks
-    cid_part1 = "410257364704-t5b4k7r427us3djs19nricpn"
-    cid_part2 = "1373ulat.apps.googleusercontent.com"
-    sec_part1 = "GOCSPX-gSTNVC3UI1Z"
-    sec_part2 = "RGavQgY_6Sd_2IhJt"
-    
-    return cid_part1 + cid_part2, sec_part1 + sec_part2
+    raise ValueError("Google OAuth credentials not configured. Set GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET environment variables, or create backend/secrets.json.")
 
 def get_google_calendar_events():
     tokens_file = os.path.join(os.path.dirname(__file__), 'google_tokens.json')
@@ -3018,12 +3804,15 @@ def get_google_calendar_events():
         "orderBy": "startTime"
     }
     
-    res = py_requests.get(events_url, headers=headers, params=params)
+    res = py_requests.get(events_url, headers=headers, params=params, timeout=10)
     if res.status_code == 401:
         # Try refresh token
         refresh_token = tokens.get('refresh_token')
         if refresh_token:
-            client_id, client_secret = get_google_oauth_credentials()
+            try:
+                client_id, client_secret = get_google_oauth_credentials()
+            except ValueError:
+                return None
             refresh_url = "https://oauth2.googleapis.com/token"
             refresh_data = {
                 "client_id": client_id,
@@ -3038,20 +3827,186 @@ def get_google_calendar_events():
                 with open(tokens_file, 'w') as f:
                     json.dump(tokens, f)
                 headers = {"Authorization": f"Bearer {tokens.get('access_token')}"}
-                res = py_requests.get(events_url, headers=headers, params=params)
+                res = py_requests.get(events_url, headers=headers, params=params, timeout=10)
                 
     if res.status_code != 200:
         return None
         
     return res.json().get('items', [])
 
+def _get_gcal_access_token():
+    """Return a valid Google Calendar access token, refreshing if needed."""
+    import requests as py_requests
+    tokens_file = os.path.join(os.path.dirname(__file__), 'google_tokens.json')
+    if not os.path.exists(tokens_file):
+        return None
+    try:
+        with open(tokens_file, 'r') as f:
+            tokens = json.load(f)
+    except Exception:
+        return None
+    access_token = tokens.get('access_token')
+    if not access_token:
+        return None
+    # Try a quick token validation; if 401, attempt refresh
+    test = py_requests.get(
+        "https://www.googleapis.com/calendar/v3/calendars/primary",
+        headers={"Authorization": f"Bearer {access_token}"},
+        timeout=5
+    )
+    if test.status_code == 401:
+        refresh_token = tokens.get('refresh_token')
+        if not refresh_token:
+            return None
+        try:
+            client_id, client_secret = get_google_oauth_credentials()
+        except ValueError:
+            return None
+        ref_res = py_requests.post("https://oauth2.googleapis.com/token", data={
+            "client_id": client_id,
+            "client_secret": client_secret,
+            "refresh_token": refresh_token,
+            "grant_type": "refresh_token"
+        }, timeout=10)
+        if ref_res.status_code == 200:
+            tokens.update(ref_res.json())
+            with open(tokens_file, 'w') as f:
+                json.dump(tokens, f)
+            access_token = tokens.get('access_token')
+        else:
+            return None
+    return access_token
+
+def push_task_to_google_calendar(task):
+    """Create a Google Calendar event for a Chronos task. Stores event id in category JSON."""
+    import requests as py_requests
+    access_token = _get_gcal_access_token()
+    if not access_token:
+        return
+    try:
+        due_str = task.get('due', '')
+        if not due_str:
+            return
+        # Build RFC3339 start/end (use estimated hours for duration)
+        due_clean = due_str.replace('Z', '+00:00')
+        due_dt = datetime.datetime.fromisoformat(due_clean)
+        est_hours = float(task.get('estimatedHours', 1))
+        start_dt = due_dt - datetime.timedelta(hours=est_hours)
+        body = {
+            "summary": task.get('title', 'Chronos Task'),
+            "description": f"Chronos Task | Importance: {task.get('importance','medium')}",
+            "start": {"dateTime": start_dt.isoformat(), "timeZone": "UTC"},
+            "end":   {"dateTime": due_dt.isoformat(),   "timeZone": "UTC"},
+            "extendedProperties": {"private": {"chronos_task_id": str(task['id'])}}
+        }
+        res = py_requests.post(
+            "https://www.googleapis.com/calendar/v3/calendars/primary/events",
+            headers={"Authorization": f"Bearer {access_token}", "Content-Type": "application/json"},
+            json=body, timeout=8
+        )
+        if res.status_code in (200, 201):
+            event_id = res.json().get('id')
+            if event_id:
+                # Persist gcalEventId inside the category JSON column
+                conn = get_db_conn()
+                cursor = conn.cursor()
+                uid = task.get('user_id', 'anonymous')
+                cursor.execute("SELECT category FROM tasks WHERE id=? AND user_id=?", (str(task['id']), uid))
+                row = cursor.fetchone()
+                cat_obj = {}
+                if row and row[0]:
+                    try:
+                        cat_obj = json.loads(row[0])
+                    except Exception:
+                        pass
+                cat_obj['gcalEventId'] = event_id
+                cursor.execute("UPDATE tasks SET category=? WHERE id=? AND user_id=?", (json.dumps(cat_obj), str(task['id']), uid))
+                conn.commit()
+                conn.close()
+                print(f"[GCal] Created event {event_id} for task {task['id']}", flush=True)
+    except Exception as e:
+        print(f"[GCal] push_task_to_google_calendar error: {e}", flush=True)
+
+def update_google_calendar_event(task):
+    """Update the linked Google Calendar event for a Chronos task."""
+    import requests as py_requests
+    # Read gcalEventId from category JSON
+    cat_str = task.get('category', '') or ''
+    try:
+        cat_obj = json.loads(cat_str) if isinstance(cat_str, str) else cat_str
+    except Exception:
+        cat_obj = {}
+    event_id = cat_obj.get('gcalEventId') if isinstance(cat_obj, dict) else None
+    if not event_id:
+        return
+    access_token = _get_gcal_access_token()
+    if not access_token:
+        return
+    try:
+        due_str = task.get('due', '')
+        if not due_str:
+            return
+        due_clean = due_str.replace('Z', '+00:00')
+        due_dt = datetime.datetime.fromisoformat(due_clean)
+        est_hours = float(task.get('estimatedHours', 1))
+        start_dt = due_dt - datetime.timedelta(hours=est_hours)
+        body = {
+            "summary": task.get('title', 'Chronos Task'),
+            "description": f"Chronos Task | Importance: {task.get('importance','medium')}",
+            "start": {"dateTime": start_dt.isoformat(), "timeZone": "UTC"},
+            "end":   {"dateTime": due_dt.isoformat(),   "timeZone": "UTC"},
+        }
+        res = py_requests.put(
+            f"https://www.googleapis.com/calendar/v3/calendars/primary/events/{event_id}",
+            headers={"Authorization": f"Bearer {access_token}", "Content-Type": "application/json"},
+            json=body, timeout=8
+        )
+        if res.status_code == 200:
+            print(f"[GCal] Updated event {event_id} for task {task['id']}", flush=True)
+    except Exception as e:
+        print(f"[GCal] update_google_calendar_event error: {e}", flush=True)
+
+def delete_google_calendar_event(task_id, cat_str):
+    """Delete the linked Google Calendar event when a Chronos task is deleted."""
+    import requests as py_requests
+    try:
+        cat_obj = json.loads(cat_str) if isinstance(cat_str, str) else {}
+    except Exception:
+        cat_obj = {}
+    event_id = cat_obj.get('gcalEventId') if isinstance(cat_obj, dict) else None
+    if not event_id:
+        return
+    access_token = _get_gcal_access_token()
+    if not access_token:
+        return
+    try:
+        py_requests.delete(
+            f"https://www.googleapis.com/calendar/v3/calendars/primary/events/{event_id}",
+            headers={"Authorization": f"Bearer {access_token}"},
+            timeout=8
+        )
+        print(f"[GCal] Deleted event {event_id} for task {task_id}", flush=True)
+    except Exception as e:
+        print(f"[GCal] delete_google_calendar_event error: {e}", flush=True)
+
+def _backend_url():
+    url = os.environ.get('BACKEND_URL') or request.host_url.rstrip('/')
+    if url.startswith('http://') and url not in ('http://localhost:5000', 'http://127.0.0.1:5000'):
+        url = 'https://' + url[7:]
+    return url
+
 @app.route('/auth/google')
+
 def auth_google():
     import urllib.parse
-    frontend_origin = request.args.get('frontend_origin', 'https://chronos-410257364704.europe-west1.run.app')
-    client_id, _ = get_google_oauth_credentials()
-    redirect_uri = "https://chronos-backend-410257364704.europe-west1.run.app/auth/google/callback"
-    scope = "https://www.googleapis.com/auth/calendar.readonly"
+    backend_url = _backend_url()
+    frontend_origin = request.args.get('frontend_origin', os.environ.get('FRONTEND_URL', backend_url))
+    try:
+        client_id, _ = get_google_oauth_credentials()
+    except ValueError as e:
+        return f"Google Calendar integration unavailable: {str(e)}", 500
+    redirect_uri = backend_url + '/auth/google/callback'
+    scope = "https://www.googleapis.com/auth/calendar"
     params = {
         "client_id": client_id,
         "redirect_uri": redirect_uri,
@@ -3067,12 +4022,15 @@ def auth_google():
 @app.route('/auth/google/callback')
 def auth_google_callback():
     code = request.args.get('code')
-    frontend_origin = request.args.get('state', 'https://chronos-410257364704.europe-west1.run.app')
+    backend_url = _backend_url()
+    frontend_origin = request.args.get('state', os.environ.get('FRONTEND_URL', backend_url))
     if not code:
         return "Missing auth code parameter", 400
-        
-    client_id, client_secret = get_google_oauth_credentials()
-    redirect_uri = "https://chronos-backend-410257364704.europe-west1.run.app/auth/google/callback"
+    try:
+        client_id, client_secret = get_google_oauth_credentials()
+    except ValueError as e:
+        return f"Google Calendar integration unavailable: {str(e)}", 500
+    redirect_uri = backend_url + '/auth/google/callback'
     
     import requests as py_requests
     token_url = "https://oauth2.googleapis.com/token"
@@ -3091,6 +4049,7 @@ def auth_google_callback():
     tokens_file = os.path.join(os.path.dirname(__file__), 'google_tokens.json')
     with open(tokens_file, 'w') as f:
         json.dump(tokens, f)
+    _gcs_backup_async()
         
     return f"""
     <html>
@@ -3131,11 +4090,12 @@ def calendar_sync():
     # If not authenticated, request frontend to open OAuth popup
     if events is None:
         data = request.get_json() or {}
-        frontend_origin = data.get('frontend_origin', 'https://chronos-410257364704.europe-west1.run.app')
-        auth_url = f"https://chronos-backend-410257364704.europe-west1.run.app/auth/google?frontend_origin={frontend_origin}"
+        backend_url = _backend_url()
+        frontend_origin = data.get('frontend_origin', os.environ.get('FRONTEND_URL', backend_url))
+        auth_url = backend_url + f"/auth/google?frontend_origin={frontend_origin}"
         return jsonify({"status": "auth_required", "url": auth_url})
         
-    tasks = load_tasks_db()
+    tasks = load_tasks_db(user_id=g.user_id)
     
     cal_tasks = []
     
@@ -3189,14 +4149,69 @@ def calendar_sync():
     for ct in cal_tasks:
         if not any(t['id'] == ct['id'] for t in tasks):
             # Bypass slow evaluate_task call to fix latency completely
-            save_task_db(ct)
+            save_task_db(ct, user_id=g.user_id)
             count += 1
             
     if count > 0:
-        send_phone_notification("Google Calendar Synced", f"Imported {count} locked calendar events. AI Intake briefing required to activate timeline.")
+        send_phone_notification("Google Calendar Synced", f"Imported {count} locked calendar tasks. AI Intake briefing required to activate timeline.")
         speech_queue.put(f"Google Calendar synced. {count} mission targets imported. Complete the intake briefings to activate.")
         
     return jsonify({"status": "synced", "count": count})
+
+def background_gcal_sync_job():
+    """Periodic background sync from Google Calendar to Chronos tasks for all users."""
+    try:
+        events = get_google_calendar_events()
+        if not events:
+            return
+        conn = get_db_conn()
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
+        cursor.execute("SELECT DISTINCT user_id FROM tasks")
+        user_ids = [row['user_id'] for row in cursor.fetchall()]
+        if not user_ids:
+            user_ids = ['anonymous']
+        for uid in user_ids:
+            existing = load_tasks_db(user_id=uid)
+            existing_ids = {t['id'] for t in existing}
+            import datetime
+            for ev in events:
+                summary = ev.get('summary', 'Untitled Event')
+                start = ev.get('start', {})
+                end = ev.get('end', {})
+                due_str = start.get('dateTime') or start.get('date')
+                if not due_str:
+                    continue
+                est_hours = 1.0
+                start_ts = start.get('dateTime')
+                end_ts = end.get('dateTime')
+                if start_ts and end_ts:
+                    try:
+                        s_dt = datetime.datetime.fromisoformat(start_ts.replace('Z', '+00:00'))
+                        e_dt = datetime.datetime.fromisoformat(end_ts.replace('Z', '+00:00'))
+                        dur = (e_dt - s_dt).total_seconds() / 3600.0
+                        if dur > 0:
+                            est_hours = round(dur, 1)
+                    except Exception:
+                        pass
+                event_id = f"gcal-{ev.get('id')}"
+                if event_id not in existing_ids:
+                    cal_task = {
+                        "id": event_id,
+                        "title": summary,
+                        "due": due_str,
+                        "estimatedHours": est_hours,
+                        "importance": "high" if "meeting" in summary.lower() or ev.get('attendees') else "medium",
+                        "completed": False,
+                        "survivalScore": 85,
+                        "escalationLevel": "green",
+                        "category": json.dumps({"locked_intake": True, "aiSummary": [], "completedCheckpoints": []})
+                    }
+                    save_task_db(cal_task, user_id=uid)
+        conn.close()
+        print(f"[GCal Auto-Sync] Synced {len(events)} events for {len(user_ids)} user(s).", flush=True)
+    except Exception as e:
+        print(f"[GCal Auto-Sync Error] {e}", flush=True)
 
 # Background Scheduler Job Initialization (runs evaluation loop every 30s)
 try:
@@ -3205,20 +4220,33 @@ try:
     def background_pulse_job():
         print("[APScheduler] Running background cron timeline evaluation...", flush=True)
         try:
-            tasks = load_tasks_db()
-            for t in tasks:
-                if not t.get('completed', False):
-                    t_eval = evaluate_task(t)
-                    save_task_db(t_eval)
+            conn = get_db_conn()
+            conn.row_factory = sqlite3.Row
+            cursor = conn.cursor()
+            cursor.execute("SELECT DISTINCT user_id FROM tasks")
+            user_ids = [row['user_id'] for row in cursor.fetchall()]
+            conn.close()
+            for uid in user_ids:
+                tasks = load_tasks_db(user_id=uid)
+                for t in tasks:
+                    if not t.get('completed', False):
+                        t_eval = evaluate_task(t, user_id=uid)
+                        save_task_db(t_eval, user_id=uid)
         except Exception as e:
             print(f"[APScheduler Job Error] {e}")
 
     scheduler = BackgroundScheduler(daemon=True)
     scheduler.add_job(background_pulse_job, 'interval', seconds=30)
+    scheduler.add_job(background_gcal_sync_job, 'interval', seconds=300)
     scheduler.start()
-    print("✅ Background APScheduler initialized. Pulses scheduled every 30s.")
+    print("✅ Background APScheduler initialized. Pulses every 30s, GCal sync every 5min.")
 except Exception as e:
     print(f"Warning: Failed to load APScheduler ({e}). Falling back to browser-pulsed triggers.")
+
+@app.route('/api/download-daemon', methods=['GET'])
+def download_daemon():
+    dist_dir = os.path.join(os.path.dirname(__file__), '..', 'dist')
+    return send_from_directory(dist_dir, 'chronos_voice_daemon.exe', as_attachment=True)
 
 @app.route('/', defaults={'path': ''})
 @app.route('/<path:path>')

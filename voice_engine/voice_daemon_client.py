@@ -44,14 +44,33 @@ def speak(text):
     if kokoro is not None:
         try:
             import sounddevice as sd
-            data, sample_rate = kokoro.create(clean_text, voice='af_bella', speed=1.15, lang='en-us')
-            sd.play(data, sample_rate)
+            import numpy as np
+            # af_sky: cleaner, more neutral tone than af_bella; speed 1.0 = natural pacing
+            data, sample_rate = kokoro.create(clean_text, voice='af_sky', speed=1.0, lang='en-us')
+            
+            # Trim trailing near-silence (< 1% amplitude) to avoid audible cutoff gap
+            threshold = np.max(np.abs(data)) * 0.01 if len(data) > 0 else 0
+            trimmed = np.trim_zeros(np.where(np.abs(data) > threshold, data, 0), 'b')
+            if len(trimmed) == 0:
+                trimmed = data
+                
+            # Add a short natural pause after speech (250ms)
+            pad_len = int(sample_rate * 0.25)
+            silence_padding = np.zeros(pad_len, dtype=trimmed.dtype)
+            padded_data = np.concatenate([trimmed, silence_padding])
+            
+            sd.play(padded_data, sample_rate)
             sd.wait()
             return
         except Exception as e:
             print(f'[Kokoro error] {e} - falling back to PowerShell TTS')
+            
     ps_text = clean_text.replace('"', '').replace("'", '')
-    ps_cmd = f"Add-Type -AssemblyName System.Speech; (New-Object System.Speech.Synthesis.SpeechSynthesizer).Speak('{ps_text}')"
+    ps_cmd = (
+        f"$s = New-Object System.Speech.Synthesis.SpeechSynthesizer; "
+        f"$s.Rate = -1; " # Calm, deliberate pacing
+        f"$s.Speak('{ps_text}');"
+    )
     subprocess.Popen(['powershell', '-Command', ps_cmd], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
 def ping_backend(url):

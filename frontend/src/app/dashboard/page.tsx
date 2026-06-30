@@ -4,12 +4,15 @@ import { useState, useEffect, useRef } from "react";
 import { useRouter } from 'next/navigation';
 import { ParticleBackground } from "../page";
 import RecoveryCommandCenter from '@/components/RecoveryCommandCenter';
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+import RecoveryLoadingPipeline from '@/components/RecoveryLoadingPipeline';
+import RecoveryBriefing, { RecoveryBriefing as RecoveryBriefingType } from '@/components/RecoveryBriefing';
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Toaster } from "@/components/ui/sonner";
 import { toast } from "sonner";
 import ChronosCanvas from "@/components/ChronosCanvas";
-import { API_BASE } from "@/config";
+import SettingsGear from '@/components/SettingsGear';
+import { API_BASE, getUserId, fetchWithTimeout, isPlaceholderTwin, isRealUsername } from "@/config";
 
 interface Task {
   id: string;
@@ -20,6 +23,7 @@ interface Task {
   completed: boolean;
   delayCount?: number;
   survivalScore?: number;
+  survivalScoreBeforeRecovery?: number;
   scoreHistory?: number[];
   recoveryForecast?: number;
   rescueResources?: any;
@@ -62,6 +66,11 @@ const renderFormattedText = (text: string) => {
     let cleaned = line.trim();
     if (!cleaned) return <div key={i} className="h-2" />;
     
+    // Divider lines → styled <hr>
+    if (/^[━─]{3,}$/.test(cleaned)) {
+      return <hr key={i} className="my-3 border-0 border-t border-white/10" />;
+    }
+    
     // Format headers
     if (cleaned.startsWith('###')) {
       return <h4 key={i} className="text-sm font-bold text-white mt-4 mb-2 uppercase tracking-wider">{cleaned.replace(/^###\s*/, '')}</h4>;
@@ -73,10 +82,28 @@ const renderFormattedText = (text: string) => {
       return <h2 key={i} className="text-lg font-black text-[#66FCF1] mt-6 mb-3 uppercase tracking-widest">{cleaned.replace(/^#\s*/, '')}</h2>;
     }
     
-    // Format bullet points
+    // Single-asterisk lines → field labels (not bullets)
+    if (cleaned.startsWith('*') && !cleaned.startsWith('**') && cleaned.length > 1) {
+      cleaned = cleaned.replace(/^\*\s*/, '');
+      const parts = cleaned.split('**');
+      const contentElements = parts.map((part, idx) => {
+        if (idx % 2 === 1) {
+          return <strong key={idx} className="font-extrabold text-[#66FCF1]">{part}</strong>;
+        }
+        return part;
+      });
+      return (
+        <div key={i} className="text-[11px] font-bold text-purple-300 uppercase tracking-wider mt-3 mb-0.5">
+          {contentElements}
+        </div>
+      );
+    }
+    
+    // Dash bullets and literal bullet characters
     let isBullet = false;
-    if (cleaned.startsWith('-') || cleaned.startsWith('*')) {
-      cleaned = cleaned.replace(/^[-\*]\s*/, '');
+    const bulletChar = cleaned.match(/^[•\-]\s*/)?.[0] || '';
+    if (bulletChar) {
+      cleaned = cleaned.replace(/^[•\-]\s*/, '');
       isBullet = true;
     }
     
@@ -90,6 +117,9 @@ const renderFormattedText = (text: string) => {
     });
     
     if (isBullet) {
+      if (!cleaned) {
+        return <div key={i} className="h-1.5" />;
+      }
       return (
         <div key={i} className="flex items-start gap-2 ml-4 my-1 font-sans text-xs text-gray-300">
           <span className="text-purple-400 mt-1">•</span>
@@ -111,6 +141,8 @@ export default function Dashboard() {
   const [isTransitioning, setIsTransitioning] = useState(true);
   const [tasks, setTasks] = useState<Task[]>([]);
   const [tasksLoading, setTasksLoading] = useState(true);
+  const [tasksLoadingSlow, setTasksLoadingSlow] = useState(false);
+  const [tasksError, setTasksError] = useState<string | null>(null);
 
   const getDynamicFailureCauses = (task: Task) => {
     const causes: string[] = [];
@@ -203,9 +235,10 @@ export default function Dashboard() {
 
   // Recovery Protocol Modal States
   const [rescuingTaskId, setRescuingTaskId] = useState<string | null>(null);
-  const [rescuePlan, setRescuePlan] = useState<string>("");
   const [rescueLoading, setRescueLoading] = useState(false);
   const [rescueData, setRescueData] = useState<Task | null>(null);
+  const [rescueBriefing, setRescueBriefing] = useState<RecoveryBriefingType | null>(null);
+  const [rescueError, setRescueError] = useState<string | null>(null);
   const [recoveryChatHistory, setRecoveryChatHistory] = useState<Array<{role: 'user' | 'assistant', content: string}>>([]);
   const [recoveryChatInput, setRecoveryChatInput] = useState("");
   const [recoveryChatLoading, setRecoveryChatLoading] = useState(false);
@@ -219,30 +252,94 @@ export default function Dashboard() {
   const [suggestedEstimate, setSuggestedEstimate] = useState<number | null>(null);
   const [hasCompletedAiEstimation, setHasCompletedAiEstimation] = useState(false);
   const [isAddingTask, setIsAddingTask] = useState(false);
-  const [loaderProgress, setLoaderProgress] = useState(0);
-
-  useEffect(() => {
-    if (!estChatLoading) {
-      setLoaderProgress(100);
-      return;
-    }
-    setLoaderProgress(0);
-    const interval = setInterval(() => {
-      setLoaderProgress(prev => {
-        if (prev >= 95) {
-          return prev + (98 - prev) * 0.05;
-        }
-        return prev + 1.8;
-      });
-    }, 150);
-    return () => clearInterval(interval);
-  }, [estChatLoading]);
+  const estSessionIdRef = useRef(0);
 
   // Explainability Panel (Why am I seeing this?)
   const [explainTaskId, setExplainTaskId] = useState<string | null>(null);
 
   // Developer Control Panel State
   const [showDevPanel, setShowDevPanel] = useState(false);
+
+  // Phone Link Modal States and Helpers
+  const [showPhoneModal, setShowPhoneModal] = useState(false);
+  const [phoneTestSuccess, setPhoneTestSuccess] = useState<boolean | null>(null);
+  const [phoneLoading, setPhoneLoading] = useState(false);
+
+  const handleOpenPhoneModal = () => {
+    setOpenSettings(false);
+    let currentTopic = ntfyTopic;
+    if (!currentTopic || currentTopic === 'chronos-alerts-user' || currentTopic.startsWith('chronos-alerts-')) {
+      const chars = 'abcdefghijklmnopqrstuvwxyz0123456789';
+      let rand = '';
+      for (let i = 0; i < 6; i++) {
+        rand += chars.charAt(Math.floor(Math.random() * chars.length));
+      }
+      currentTopic = `chronos_alerts_${rand}`;
+      setNtfyTopic(currentTopic);
+      localStorage.setItem("chronos-ntfy-topic", currentTopic);
+      // Save to backend settings immediately
+      fetch(`${API_BASE}/api/settings`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ ntfyTopic: currentTopic })
+      }).catch(() => {});
+    }
+    setShowPhoneModal(true);
+  };
+
+  const handleSavePhoneTopic = async () => {
+    if (!ntfyTopic.trim()) {
+      toast.error("Topic name cannot be empty.");
+      return;
+    }
+    setPhoneLoading(true);
+    try {
+      const res = await fetch(`${API_BASE}/api/settings`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ ntfyTopic: ntfyTopic })
+      });
+      if (res.ok) {
+        localStorage.setItem("chronos-ntfy-topic", ntfyTopic);
+        toast.success("Phone link topic saved and synchronized.");
+      } else {
+        throw new Error();
+      }
+    } catch (err) {
+      localStorage.setItem("chronos-ntfy-topic", ntfyTopic);
+      toast.info("Saved locally (offline mode).");
+    } finally {
+      setPhoneLoading(false);
+    }
+  };
+
+  const handleTestPhoneTopic = async () => {
+    if (!ntfyTopic.trim()) {
+      toast.error("Set a topic name first.");
+      return;
+    }
+    setPhoneLoading(true);
+    setPhoneTestSuccess(null);
+    try {
+      const res = await fetch(`${API_BASE}/api/phone/test`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ntfyTopic: ntfyTopic })
+      });
+      if (res.ok) {
+        setPhoneTestSuccess(true);
+        toast.success("Verification notification dispatched successfully!");
+      } else {
+        setPhoneTestSuccess(false);
+        toast.error("Failed to reach notification broker.");
+      }
+    } catch (err) {
+      setPhoneTestSuccess(false);
+      toast.error("Network error. Verify internet connectivity.");
+    } finally {
+      setPhoneLoading(false);
+    }
+  };
   const [devOverrideState, setDevOverrideState] = useState<'idle' | 'listening' | 'thinking' | 'speaking' | 'warning' | 'offline' | null>(null);
   
   const [recoveryCountdown, setRecoveryCountdown] = useState<string>("");
@@ -330,6 +427,18 @@ export default function Dashboard() {
   const [pickerMinute, setPickerMinute] = useState("00");
   const [pickerAmPm, setPickerAmPm] = useState("PM");
   const [pickerDate, setPickerDate] = useState<Date | null>(null);
+  const calendarPickerRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!showCalendarPicker) return;
+    const handleClickOutside = (e: MouseEvent) => {
+      if (calendarPickerRef.current && !calendarPickerRef.current.contains(e.target as Node)) {
+        setShowCalendarPicker(false);
+      }
+    };
+    document.addEventListener('mousedown', handleClickOutside);
+    return () => document.removeEventListener('mousedown', handleClickOutside);
+  }, [showCalendarPicker]);
 
   const updateNewDue = (date: Date | null, hr: string, min: string, ampm: string) => {
     if (!date) return;
@@ -479,6 +588,8 @@ export default function Dashboard() {
   const [settingsConnectionError, setSettingsConnectionError] = useState<string>("");
   const [settingsRecheckTrigger, setSettingsRecheckTrigger] = useState(0);
   const [reverifyingTwin, setReverifyingTwin] = useState(false);
+  const [isSavingSettings, setIsSavingSettings] = useState(false);
+  const [calendarSyncState, setCalendarSyncState] = useState<'idle' | 'syncing' | 'authorizing'>('idle');
   
   const [aiConnectionStatus, setAiConnectionStatus] = useState<'checking' | 'online' | 'offline'>('checking');
 
@@ -494,22 +605,37 @@ export default function Dashboard() {
     };
   }, [openSettings]);
 
-  // Twin Profile Modal states
-  const [openTwinModal, setOpenTwinModal] = useState(false);
-  const [twinTab, setTwinTab] = useState<'profile' | 'telemetry'>('profile');
-  const [procrastinationRating, setProcrastinationRating] = useState<number>(8.0);
-  const [attentionCycle, setAttentionCycle] = useState<string>("Focus cycles peak late evening");
-  const [stressResponse, setStressResponse] = useState<string>("Postpones tasks under high workload pressure");
-  const [executionCount, setExecutionCount] = useState<number>(0);
-  const [failureCount, setFailureCount] = useState<number>(0);
-  const [streakCount, setStreakCount] = useState<number>(0);
-  const [totalRecoveredHours, setTotalRecoveredHours] = useState<number>(0.0);
+// Twin Profile Modal states
+   const [openTwinModal, setOpenTwinModal] = useState(false);
+   const [twinTab, setTwinTab] = useState<'profile' | 'telemetry'>('profile');
+   const [procrastinationRating, setProcrastinationRating] = useState<number | null>(null);
+   const [attentionCycle, setAttentionCycle] = useState<string | null>(null);
+   const [stressResponse, setStressResponse] = useState<string | null>(null);
+   const [executionCount, setExecutionCount] = useState<number | null>(null);
+   const [failureCount, setFailureCount] = useState<number | null>(null);
+   const [streakCount, setStreakCount] = useState<number | null>(null);
+   const [totalRecoveredHours, setTotalRecoveredHours] = useState<number | null>(null);
   
   const [isTrainingBrain, setIsTrainingBrain] = useState(false);
   const [trainingHistory, setTrainingHistory] = useState<any[]>([]);
   const [trainingInput, setTrainingInput] = useState("");
   const [trainingLoading, setTrainingLoading] = useState(false);
   const [briefingTaskId, setBriefingTaskId] = useState<string | null>(null);
+
+  const recoveryChatEndRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    recoveryChatEndRef.current?.scrollTo({ top: recoveryChatEndRef.current.scrollHeight, behavior: 'smooth' });
+  }, [recoveryChatHistory, recoveryChatLoading]);
+
+  const estChatEndRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    estChatEndRef.current?.scrollTo({ top: estChatEndRef.current.scrollHeight, behavior: 'smooth' });
+  }, [estChatHistory]);
+
+  const trainingChatEndRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    trainingChatEndRef.current?.scrollTo({ top: trainingChatEndRef.current.scrollHeight, behavior: 'smooth' });
+  }, [trainingHistory, trainingLoading]);
 
   // Voice Assistant Orb states
   const [orbState, setOrbState] = useState<'idle' | 'listening' | 'thinking' | 'speaking' | 'warning' | 'offline'>('idle');
@@ -583,15 +709,31 @@ export default function Dashboard() {
 
   useEffect(() => {
     let interval: NodeJS.Timeout;
+    const userId = getUserId();
     const sendHeartbeat = async () => {
       try {
-        await fetch('http://127.0.0.1:43210/heartbeat', { mode: 'cors' });
+        const controller = new AbortController();
+        const timeout = setTimeout(() => controller.abort(), 2000);
+        await fetch('http://127.0.0.1:43210/heartbeat', { mode: 'cors', signal: controller.signal });
+        clearTimeout(timeout);
       } catch (e) {
-        // Ignore connection failures when daemon is not running
+        // Daemon not running — ok
       }
     };
+    const registerDaemon = async () => {
+      try {
+        await fetch('http://127.0.0.1:43210/register', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ userId })
+        });
+      } catch (e) {
+        // Daemon not running — ok
+      }
+    };
+    registerDaemon();
     sendHeartbeat();
-    interval = setInterval(sendHeartbeat, 3000);
+    interval = setInterval(sendHeartbeat, 5000);
     return () => clearInterval(interval);
   }, []);
 
@@ -652,22 +794,71 @@ export default function Dashboard() {
     }, 450);
   };
 
+  const getTaskCacheKey = () => `chronos-task-cache-${getUserId()}`;
+
+  const cacheTasks = (nextTasks: Task[]) => {
+    try {
+      localStorage.setItem(getTaskCacheKey(), JSON.stringify(nextTasks));
+    } catch (err) {
+      console.warn("Could not cache tasks locally.", err);
+    }
+  };
+
+  const readCachedTasks = (): Task[] => {
+    try {
+      const raw = localStorage.getItem(getTaskCacheKey());
+      const parsed = raw ? JSON.parse(raw) : [];
+      return Array.isArray(parsed) ? parsed : [];
+    } catch {
+      return [];
+    }
+  };
+
+  const replaceTasks = (nextTasks: Task[]) => {
+    setTasks(nextTasks);
+    cacheTasks(nextTasks);
+  };
+
   const fetchTasks = async () => {
     setTasksLoading(true);
+    setTasksLoadingSlow(false);
+    setTasksError(null);
+    const slowTimer = setTimeout(() => setTasksLoadingSlow(true), 300);
     try {
-      const res = await fetch(`${API_BASE}/api/tasks`);
+      const res = await fetchWithTimeout(`${API_BASE}/api/tasks`, {}, 15000);
+      clearTimeout(slowTimer);
       if (!res.ok) throw new Error("API core offline");
       const data = await res.json();
-      setTasks(data);
-      checkAndSpeakInterventions(data);
-    } catch (err) {
-      console.warn("Could not fetch tasks from backend. Falling back to local storage.", err);
-      const savedTasks = localStorage.getItem("chronos-tasks");
-      if (savedTasks) {
-        setTasks(JSON.parse(savedTasks));
+      const cached = readCachedTasks();
+      if (Array.isArray(data) && data.length === 0 && cached.length > 0) {
+        replaceTasks(cached);
+        cached.forEach(task => {
+          fetch(`${API_BASE}/api/tasks/${task.id}`, {
+            method: "PUT",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(task)
+          }).catch(err => console.warn("Failed to rehydrate cached task", err));
+        });
+        checkAndSpeakInterventions(cached);
+      } else {
+        const nextTasks = Array.isArray(data) ? data : [];
+        replaceTasks(nextTasks);
+        checkAndSpeakInterventions(nextTasks);
       }
+    } catch (err) {
+      clearTimeout(slowTimer);
+      console.warn("Could not fetch tasks from backend.", err);
+      const cached = readCachedTasks();
+      if (cached.length > 0) {
+        replaceTasks(cached);
+      }
+      const message = err instanceof Error && err.name === 'AbortError'
+        ? "Mission data request timed out."
+        : "Could not load mission data. Check backend connection.";
+      setTasksError(message);
     } finally {
       setTasksLoading(false);
+      setTasksLoadingSlow(false);
     }
   };
 
@@ -680,112 +871,160 @@ export default function Dashboard() {
       });
       if (!res.ok) throw new Error("Pulse error");
       const data = await res.json();
-      setTasks(data);
-      checkAndSpeakInterventions(data);
+      // Only update tasks if pulse returned actual data — prevents disappearance bug
+      if (Array.isArray(data) && data.length > 0) {
+        replaceTasks(data);
+        checkAndSpeakInterventions(data);
+      }
     } catch (err) {
-      console.warn("Pulse failed, simulating locally:", err);
+      console.warn("Pulse failed, preserving current task state:", err);
     }
   };
 
   useEffect(() => {
-    // Route Guard: Prevent skipping onboarding
-    const savedName = localStorage.getItem("chronos-username");
-    const savedTwin = localStorage.getItem("chronos-performance-twin");
-    if (!savedName || !savedTwin) {
-      router.push('/');
-      return;
-    }
+    let cancelled = false;
 
-    const nameVal = savedName || "user";
-    setUsername(nameVal);
+    const initDashboard = async () => {
+      const savedName = localStorage.getItem("chronos-username");
+      const savedTwin = localStorage.getItem("chronos-performance-twin");
+      const localTwinValid = !!savedTwin && !isPlaceholderTwin(savedTwin);
 
-    const twinVal = savedTwin || `### PERFORMANCE TWIN PROFILE (DEMO)
-- **Procrastination Risk**: MEDIUM
-- **Peak Focus Window**: 8:00 PM - 12:00 AM
-- **Primary Source of Delay**: Scope Creep & Perfectionism`;
-    setPerformanceTwin(twinVal);
+      if (!localTwinValid) {
+        if (!cancelled) router.push('/');
+        return;
+      }
 
-    const savedConfig = localStorage.getItem("chronos-ai-config");
-    const configVal = savedConfig ? JSON.parse(savedConfig) : {
-      provider: 'gemini',
-      apiUrl: 'https://generativelanguage.googleapis.com/v1beta',
-      apiKey: '',
-      model: 'gemini-1.5-flash',
-      maxQuestions: 7
-    };
-    setAiConfig(configVal);
-
-    const savedActiveRecovery = localStorage.getItem("chronos-active-recovery-task-id");
-    if (savedActiveRecovery) {
-      setActiveRecoveryTaskId(savedActiveRecovery);
-    }
-
-    // Load actual synced settings from backend database
-    const fetchBackendSettings = async () => {
       try {
-        const res = await fetch(`${API_BASE}/api/settings`);
+        const res = await fetchWithTimeout(`${API_BASE}/api/settings`, {}, 10000);
         if (res.ok) {
           const data = await res.json();
-          if (data.username) {
-            setUsername(data.username);
-            localStorage.setItem("chronos-username", data.username);
+          const backendTwinValid = data.twinProfile && !isPlaceholderTwin(data.twinProfile);
+          const onboardingDone = data.onboarding_completed === 1 || data.onboarding_completed === true;
+
+          if (!onboardingDone && !localTwinValid && !backendTwinValid) {
+            if (!cancelled) router.push('/');
+            return;
           }
-          if (data.sleepStart !== undefined) setSleepStart(Number(data.sleepStart));
-          if (data.sleepEnd !== undefined) setSleepEnd(Number(data.sleepEnd));
-          if (data.ntfyTopic !== undefined) setNtfyTopic(data.ntfyTopic);
-          if (data.twinProfile) {
-            setPerformanceTwin(data.twinProfile);
-            localStorage.setItem("chronos-performance-twin", data.twinProfile);
-          }
-          if (data.procrastinationRating !== undefined) setProcrastinationRating(Number(data.procrastinationRating));
-          if (data.attentionCycle !== undefined) setAttentionCycle(data.attentionCycle);
-          if (data.stressResponse !== undefined) setStressResponse(data.stressResponse);
-          if (data.executionCount !== undefined) setExecutionCount(Number(data.executionCount));
-          if (data.failureCount !== undefined) setFailureCount(Number(data.failureCount));
-          if (data.streakCount !== undefined) setStreakCount(Number(data.streakCount));
-          if (data.totalRecoveredHours !== undefined) setTotalRecoveredHours(Number(data.totalRecoveredHours));
-          if (data.aiProvider) {
-            const configObj = {
-              provider: data.aiProvider,
-              apiUrl: data.aiApiUrl || '',
-              apiKey: data.aiApiKey || '',
-              model: data.aiModel || 'gemini-1.5-flash',
-              maxQuestions: 7
-            };
-            setAiConfig(configObj);
-            localStorage.setItem("chronos-ai-config", JSON.stringify(configObj));
+
+          if (!onboardingDone && localTwinValid) {
+            await fetch(`${API_BASE}/api/settings`, {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({
+                username: isRealUsername(savedName) ? savedName : (isRealUsername(data.username) ? data.username : savedName),
+                twinProfile: savedTwin,
+                sleepStart: data.sleepStart ?? Number(localStorage.getItem('chronos-sleep-start') ?? 23),
+                sleepEnd: data.sleepEnd ?? Number(localStorage.getItem('chronos-sleep-end') ?? 7),
+                onboardingComplete: true,
+              }),
+            });
           }
         }
-      } catch (err) {
-        console.warn("Failed to fetch settings from backend on dashboard mount", err);
+      } catch {
+        if (!localTwinValid) {
+          if (!cancelled) router.push('/');
+          return;
+        }
       }
-    };
 
-    // Initial load
-    const loadData = async () => {
+      if (cancelled) return;
+
+      const nameVal = isRealUsername(savedName) ? savedName! : "user";
+      setUsername(nameVal);
+      setPerformanceTwin(savedTwin!);
+
+      const savedConfig = localStorage.getItem("chronos-ai-config");
+      const configVal = savedConfig ? JSON.parse(savedConfig) : {
+        provider: 'gemini',
+        apiUrl: 'https://generativelanguage.googleapis.com/v1beta',
+        apiKey: '',
+        model: 'gemini-1.5-flash',
+        maxQuestions: 7
+      };
+      setAiConfig(configVal);
+
+      const savedActiveRecovery = localStorage.getItem("chronos-active-recovery-task-id");
+      if (savedActiveRecovery) {
+        setActiveRecoveryTaskId(savedActiveRecovery);
+      }
+
+      const fetchBackendSettings = async () => {
+        try {
+          const res = await fetchWithTimeout(`${API_BASE}/api/settings`, {}, 10000);
+          if (res.ok) {
+            const data = await res.json();
+            const localName = localStorage.getItem("chronos-username");
+            if (isRealUsername(data.username)) {
+              setUsername(data.username);
+              localStorage.setItem("chronos-username", data.username);
+            } else if (isRealUsername(localName)) {
+              setUsername(localName!);
+            }
+            if (data.sleepStart !== undefined) {
+              setSleepStart(Number(data.sleepStart));
+              localStorage.setItem('chronos-sleep-start', String(data.sleepStart));
+            }
+            if (data.sleepEnd !== undefined) {
+              setSleepEnd(Number(data.sleepEnd));
+              localStorage.setItem('chronos-sleep-end', String(data.sleepEnd));
+            }
+            if (data.ntfyTopic !== undefined) setNtfyTopic(data.ntfyTopic);
+            if (data.twinProfile && !isPlaceholderTwin(data.twinProfile)) {
+              setPerformanceTwin(data.twinProfile);
+              localStorage.setItem("chronos-performance-twin", data.twinProfile);
+            }
+            if (data.procrastinationRating !== undefined) setProcrastinationRating(Number(data.procrastinationRating));
+            if (data.attentionCycle !== undefined) setAttentionCycle(data.attentionCycle);
+            if (data.stressResponse !== undefined) setStressResponse(data.stressResponse);
+            if (data.executionCount !== undefined) setExecutionCount(Number(data.executionCount));
+            if (data.failureCount !== undefined) setFailureCount(Number(data.failureCount));
+            if (data.streakCount !== undefined) setStreakCount(Number(data.streakCount));
+            if (data.totalRecoveredHours !== undefined) setTotalRecoveredHours(Number(data.totalRecoveredHours));
+            if (data.aiProvider) {
+              const configObj = {
+                provider: data.aiProvider,
+                apiUrl: data.aiApiUrl || '',
+                apiKey: data.aiApiKey || '',
+                model: data.aiModel || 'gemini-1.5-flash',
+                maxQuestions: 7
+              };
+              setAiConfig(configObj);
+              localStorage.setItem("chronos-ai-config", JSON.stringify(configObj));
+            }
+          }
+        } catch (err) {
+          console.warn("Failed to fetch settings from backend on dashboard mount", err);
+        }
+      };
+
       await fetchBackendSettings();
       await fetchTasks();
-      await runAgentPulse(savedTwin);
-      
-      // Trigger the mission briefing spoken reminder if daemon is sync-active
+      await runAgentPulse(savedTwin!);
+
       try {
         fetch(`${API_BASE}/api/voice/briefing`, { method: "POST" });
       } catch (e) {}
     };
-    loadData();
 
-    // Regular interval Agent Pulse (every 12 seconds)
+    initDashboard();
+
     const interval = setInterval(() => {
-      runAgentPulse(savedTwin);
+      const twin = localStorage.getItem("chronos-performance-twin");
+      if (twin && !isPlaceholderTwin(twin)) runAgentPulse(twin);
     }, 12000);
 
-    return () => clearInterval(interval);
+    return () => {
+      cancelled = true;
+      clearInterval(interval);
+    };
   }, []);
 
 
-  // Initialize Settings States when opened
+  // Initialize Settings States when opened (only on open transition)
+  const settingsInitRef = useRef(false);
   useEffect(() => {
-    if (openSettings) {
+    if (openSettings && !settingsInitRef.current) {
+      settingsInitRef.current = true;
       if (aiConfig) {
         setSettingsProvider(aiConfig.provider || 'gemini');
         setSettingsApiUrl(aiConfig.apiUrl || 'https://generativelanguage.googleapis.com/v1beta');
@@ -800,7 +1039,12 @@ export default function Dashboard() {
           return res.json();
         })
         .then(data => {
-          if (data.username) setUsername(data.username);
+          const localName = localStorage.getItem('chronos-username');
+          if (localName && (!data.username || data.username === 'user')) {
+            setUsername(localName);
+          } else if (data.username) {
+            setUsername(data.username);
+          }
           if (data.sleepStart !== undefined) setSleepStart(data.sleepStart);
           if (data.sleepEnd !== undefined) setSleepEnd(data.sleepEnd);
           if (data.ntfyTopic !== undefined) setNtfyTopic(data.ntfyTopic);
@@ -813,8 +1057,10 @@ export default function Dashboard() {
           if (data.totalRecoveredHours !== undefined) setTotalRecoveredHours(Number(data.totalRecoveredHours));
         })
         .catch(err => console.warn("Failed to fetch settings from backend", err));
+    } else if (!openSettings) {
+      settingsInitRef.current = false;
     }
-  }, [openSettings, aiConfig]);
+  }, [openSettings]);
 
   // Dynamic Model Fetching & Connectivity Validation in Settings
   useEffect(() => {
@@ -849,12 +1095,15 @@ export default function Dashboard() {
         setAiConnectionStatus('checking');
       }
       try {
-        const queryParams = new URLSearchParams({
-          provider: provider,
-          apiUrl: apiUrl,
-          apiKey: apiKey || '',
-        });
-        const res = await fetch(`${API_BASE}/api/ai/models?${queryParams.toString()}`);
+        const res = await fetchWithTimeout(`${API_BASE}/api/ai/models`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            provider: provider,
+            apiUrl: apiUrl,
+            apiKey: apiKey || '',
+          }),
+        }, 8000);
         if (!res.ok) throw new Error("Verification request failed");
         const data = await res.json();
         
@@ -914,9 +1163,10 @@ export default function Dashboard() {
       active = false;
       clearTimeout(delayDebounce);
     };
-  }, [settingsProvider, settingsApiUrl, settingsApiKey, openSettings, settingsRecheckTrigger, aiConfig]);
+  }, [settingsProvider, settingsApiUrl, settingsApiKey, openSettings, settingsRecheckTrigger, aiConfig?.provider, aiConfig?.apiUrl, aiConfig?.apiKey]);
 
   const handleSaveSettings = async () => {
+    if (isSavingSettings) return;
     if (settingsProvider !== 'custom' && !settingsApiKey.trim()) {
       toast.error("API Key is mandatory for this supplier.");
       return;
@@ -925,6 +1175,9 @@ export default function Dashboard() {
       toast.error("AI Model name is mandatory.");
       return;
     }
+
+    setIsSavingSettings(true);
+    const toastId = toast.loading("Saving settings...");
 
     const newConfig = {
       provider: settingsProvider,
@@ -935,10 +1188,12 @@ export default function Dashboard() {
     };
     localStorage.setItem('chronos-ai-config', JSON.stringify(newConfig));
     localStorage.setItem('chronos-username', username);
+    localStorage.setItem('chronos-sleep-start', String(sleepStart));
+    localStorage.setItem('chronos-sleep-end', String(sleepEnd));
     setAiConfig(newConfig);
     
     try {
-      await fetch(`${API_BASE}/api/settings`, {
+      await fetchWithTimeout(`${API_BASE}/api/settings`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -947,31 +1202,33 @@ export default function Dashboard() {
           sleepStart: Number(sleepStart),
           sleepEnd: Number(sleepEnd),
           ntfyTopic: ntfyTopic,
-          procrastinationRating: Number(procrastinationRating),
-          attentionCycle: attentionCycle,
-          stressResponse: stressResponse,
-          // AI config persistence so backend can use it for timeline generation
+procrastinationRating: procrastinationRating !== null ? Number(procrastinationRating) : undefined,
+           attentionCycle: attentionCycle !== null ? attentionCycle : undefined,
+           stressResponse: stressResponse !== null ? stressResponse : undefined,
           aiProvider: settingsProvider,
           aiApiUrl: settingsProvider === 'gemini' ? 'https://generativelanguage.googleapis.com/v1beta' : settingsApiUrl,
           aiApiKey: settingsApiKey,
           aiModel: settingsModel
         })
-      });
-      // Trigger a pulse to update task urgency metrics based on new sleep schedule
+      }, 15000);
       fetch(`${API_BASE}/api/tasks/pulse`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ twinProfile: performanceTwin })
       })
       .then(res => res.json())
-      .then(data => setTasks(data))
+      .then(data => { if (Array.isArray(data) && data.length > 0) replaceTasks(data); })
       .catch(err => console.warn("Pulse update failed:", err));
+      toast.dismiss(toastId);
+      toast.success("Settings saved successfully.");
+      setOpenSettings(false);
     } catch (err) {
+      toast.dismiss(toastId);
       console.warn("Failed to save settings to backend", err);
+      toast.error("Failed to save settings. Changes kept locally.");
+    } finally {
+      setIsSavingSettings(false);
     }
-    
-    setOpenSettings(false);
-    toast.success("AI Core Supplier and Twin configuration updated.");
   };
 
   const handleReverifyTwin = async () => {
@@ -999,7 +1256,7 @@ export default function Dashboard() {
 
   // Parse twin profile to extract brief summary for the dashboard personality card
   const getPersonalityBrief = (twinText: string) => {
-    if (!twinText) return ["Initializing behavioral personality map..."];
+    if (!twinText || isPlaceholderTwin(twinText)) return ["Complete the identity scan to initialize your twin profile."];
     
     // Strip markdown title lines
     let clean = twinText
@@ -1021,7 +1278,9 @@ export default function Dashboard() {
   };
 
   const renderPersonalityBrief = (twinText: string) => {
-    if (!twinText) return <p className="text-[10px] text-gray-500 font-mono">Initializing behavioral personality map...</p>;
+    if (!twinText || isPlaceholderTwin(twinText)) {
+      return <p className="text-[10px] text-gray-500 font-mono">Complete the identity scan to initialize your twin profile.</p>;
+    }
     
     const lines = getPersonalityBrief(twinText);
     return (
@@ -1348,6 +1607,8 @@ Keep the tone clinical, diagnostic, and highly personalized. Start immediately w
 You MUST analyze the operator's actual schedule, task deadlines, sleep schedule, and procrastination risks.
 Generate a Calendar Debrief structured EXACTLY like the following template. Fill in the bracketed placeholders using the operator's actual real data (e.g. operator name, current date, task names, actual sleep schedule, estimated hours, and risk score/survival score):
 
+CRITICAL RULE: Only report a "sleep overlap" or "scheduling conflict" if a deadline or required work block actually falls WITHIN the operator's sleep window (${sleepStart}:00 to ${sleepEnd}:00). If a deadline occurs during awake hours, explicitly state there is NO sleep conflict for that deadline. Never frame an awake-hour deadline as a sleep scheduling conflict.
+
 # Chronos Calendar Debrief
 
 * **Operator**: [Operator Name]
@@ -1392,11 +1653,11 @@ Generate the tactical calendar debrief now.`;
         ]
       };
 
-      const res = await fetch(`${API_BASE}/api/ai/chat`, {
+      const res = await fetchWithTimeout(`${API_BASE}/api/ai/chat`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(apiPayload)
-      });
+      }, 60000);
 
       if (!res.ok) throw new Error("AI Chat API failed");
       const resData = await res.json();
@@ -1405,35 +1666,42 @@ Generate the tactical calendar debrief now.`;
       console.error("Failed to generate calendar debrief", err);
       // Construct a beautiful high-fidelity local fallback using real data
       const activeTaskList = tasks.filter(t => !t.completed);
+      const totalActiveEffort = activeTaskList.reduce((sum, t) => sum + t.estimatedHours, 0);
       const topTask = activeTaskList.length > 0 ? activeTaskList[0] : null;
-      const topTaskTitle = topTask ? topTask.title : "active tasks";
-      const topTaskEffort = topTask ? topTask.estimatedHours : 4;
-      const topTaskRisk = topTask ? (100 - (topTask.survivalScore ?? 75)) : 25;
+      const topTaskTitle = topTask ? topTask.title : "No active tasks";
       const formattedDate = new Date().toLocaleDateString('en-GB');
 
-      const fallbackText = `# Chronos Calendar Debrief
+      const sleepHoursList: number[] = [];
+      let curr = sleepStart;
+      while (curr !== sleepEnd) {
+        sleepHoursList.push(curr);
+        curr = (curr + 1) % 24;
+      }
+
+      const tasksWithSleepOverlap = activeTaskList.filter(t => {
+        if (!t.due) return false;
+        const dueHour = new Date(t.due).getHours();
+        return sleepHoursList.includes(dueHour);
+      });
+
+      const sleepOverlapText = tasksWithSleepOverlap.length > 0
+        ? `${tasksWithSleepOverlap.length} active deadline${tasksWithSleepOverlap.length > 1 ? 's' : ''} fall inside the sleep window (${sleepStart}:00–${sleepEnd}:00).`
+        : `No active deadlines fall inside the sleep window (${sleepStart}:00–${sleepEnd}:00).`;
+
+      const fallbackText = `# Chronos Calendar Debrief (Local Fallback)
 
 * **Operator**: ${username}
 * **Date**: ${formattedDate}
-* **Priority**: High - Significant risk of burnout and potential project delays exist.
+* **Priority**: ${activeTaskList.length === 0 ? 'Low - No active missions' : totalActiveEffort > 20 ? 'High - Heavy workload detected' : 'Moderate - Active missions in progress'}
 * **Analysis**:
-  * **Sleep Hour Overlaps**: The operator's sleep schedule (${sleepStart}:00 to ${sleepEnd}:00) overlaps with upcoming deadlines. This poses a significant risk.
-  * **Risk Mitigation**: Implement a strict "No-Work" period from ${sleepStart}:00 to ${sleepEnd}:00. All activity, including device access, is restricted during this time.
-  * **Burnout Spikes**: The "${topTaskTitle}" task has an estimated effort of ${topTaskEffort}h and an associated deadline threat score of ${topTaskRisk}%. This indicates potential for burnout due to sustained workload.
-  * **Actionable Advice**: The operator should:
-    * **Divide and Conquer**: Break down the "${topTaskTitle}" task into smaller, manageable sub-tasks with realistic deadlines.
-    * **Prioritize & Schedule**: Focus on high-impact tasks first using the Eisenhower Matrix (urgent/important).
-    * **Take Breaks**: Implement short breaks throughout each task block to avoid mental fatigue.
-* **Timeline Visualization**: 
-  [Active Timeline Grid]
-  ${activeTaskList.map(t => `  • ${t.title} -> Due: ${new Date(t.due).toLocaleDateString('en-GB')} at ${new Date(t.due).toLocaleTimeString('en-GB', {hour: '2-digit', minute:'2-digit'})} (Effort: ${t.estimatedHours}h)`).join('\n')}
-* **Recommendations**:
-  * **Communication & Coordination**: Schedule regular check-ins with relevant stakeholders for progress updates and to address potential roadblocks.
-  * **Performance Monitoring**: Continuously monitor performance throughout the project using time tracking and task completion rates.
-  * **Emergency Plan**: Develop a backup mitigation plan if the "${topTaskTitle}" deadline is at risk of being missed due to burnout.
-* **Disclaimer**: This analysis provides strategic insight based on the provided information. Chronos' recommendations are designed to mitigate risks and promote optimal performance.
-* **Note**: Further analysis can be conducted with more data points, including task difficulty and individual work style tendencies.
-* **Next Steps**: Implement these recommendations to ensure the operator's well-being and project success.`;
+  * **Active Missions**: ${activeTaskList.length} task${activeTaskList.length !== 1 ? 's' : ''} in progress, ${totalActiveEffort.toFixed(1)}h total estimated effort.
+  * **Sleep Hour Overlaps**: ${sleepOverlapText}
+  * **Top Priority**: "${topTaskTitle}"${topTask ? ` due ${new Date(topTask.due).toLocaleDateString('en-GB')}` : ''}.
+* **Actionable Advice**:
+  * Review the task list above and confirm deadlines are realistic given the sleep schedule.
+  * If any deadline falls in the sleep window, consider shifting it to an earlier awake hour.
+  * Use the AI Debrief for a full tactical analysis when the AI Core is online.
+* **Disclaimer**: This is a simplified local analysis. For full AI-generated tactical advice, ensure the AI Core is online and retry.`;
 
       setCalendarAnalysis(fallbackText);
     } finally {
@@ -1442,10 +1710,11 @@ Generate the tactical calendar debrief now.`;
   };
 
   useEffect(() => {
-    if (currentView === 'calendar-debrief' && !calendarAnalysis && !calendarAnalysisLoading && aiConfig) {
+    if (currentView === 'calendar-debrief' && !calendarAnalysisLoading && aiConfig) {
+      setCalendarAnalysis("");
       handleGenerateCalendarAnalysis();
     }
-  }, [currentView, aiConfig]);
+  }, [currentView, aiConfig, sleepStart, sleepEnd, username, tasks]);
 
   const handleSendTerminalMessage = async (e?: React.FormEvent) => {
     if (e) e.preventDefault();
@@ -1604,7 +1873,7 @@ Consider the operator's digital twin profile: ${performanceTwin}.${tasksInfo}`;
       });
       if (!res.ok) throw new Error("Simulation error");
       const data = await res.json();
-      setTasks(data);
+      replaceTasks(data);
       toast.dismiss(toastId);
       toast.info("Clock advanced by 1 hour. Survival Probabilities recalculated.");
       checkAndSpeakInterventions(data);
@@ -1624,7 +1893,7 @@ Consider the operator's digital twin profile: ${performanceTwin}.${tasksInfo}`;
       });
       if (!res.ok) throw new Error("Collapse error");
       const data = await res.json();
-      setTasks(data);
+      replaceTasks(data);
       toast.dismiss(toastId);
       toast.error("⚠ DEADLINE COLLAPSE DETECTED. Emergency Protocol Activated.");
       checkAndSpeakInterventions(data);
@@ -1651,25 +1920,30 @@ Consider the operator's digital twin profile: ${performanceTwin}.${tasksInfo}`;
   };
 
   const handleSyncGoogleCalendarDirect = async () => {
+    if (calendarSyncState === 'syncing') return;
+    setCalendarSyncState('syncing');
     const toastId = toast.loading("Syncing Google Calendar events...");
     try {
-      const res = await fetch(`${API_BASE}/api/calendar/sync`, {
+      const res = await fetchWithTimeout(`${API_BASE}/api/calendar/sync`, {
         method: "POST",
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ frontend_origin: window.location.origin })
-      });
+      }, 20000);
       if (!res.ok) throw new Error();
       const data = await res.json();
       toast.dismiss(toastId);
+      localStorage.setItem('chronos-calendar-connected', 'true');
       if (data.count > 0) {
-        toast.success(`Synced Google Calendar: Imported ${data.count} Locked Exams.`);
+        toast.success(`Synced Google Calendar: Imported ${data.count} Locked Tasks.`);
       } else {
         toast.info("Google Calendar is up to date.");
       }
       fetchTasks();
     } catch (e) {
       toast.dismiss(toastId);
-      toast.error("Google Calendar sync failed.");
+      toast.error("Google Calendar sync failed or timed out.");
+    } finally {
+      setCalendarSyncState('idle');
     }
   };
 
@@ -1694,40 +1968,56 @@ Consider the operator's digital twin profile: ${performanceTwin}.${tasksInfo}`;
   };
 
   const handleSyncGoogleCalendar = async () => {
+    if (calendarSyncState !== 'idle') return;
+    setCalendarSyncState('authorizing');
     const toastId = toast.loading("Syncing Google Calendar events...");
+    const authTimeout = setTimeout(() => {
+      setCalendarSyncState('idle');
+      toast.dismiss(toastId);
+      toast.error("Calendar authorization timed out. Please try again.");
+    }, 15000);
+
     try {
-      const res = await fetch(`${API_BASE}/api/calendar/sync`, {
+      const res = await fetchWithTimeout(`${API_BASE}/api/calendar/sync`, {
         method: "POST",
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ frontend_origin: window.location.origin })
-      });
+      }, 20000);
       if (!res.ok) throw new Error();
       const data = await res.json();
       
       if (data.status === 'auth_required') {
         toast.dismiss(toastId);
-        const popup = window.open(data.url, 'ChronosGoogleAuth', 'width=600,height=700');
+        toast.info("Complete Google authorization in the popup window...");
+        window.open(data.url, 'ChronosGoogleAuth', 'width=600,height=700');
         
         const handleAuthMessage = async (e: MessageEvent) => {
           if (e.data && e.data.type === 'CHRONOS_GCAL_AUTH_SUCCESS') {
             window.removeEventListener('message', handleAuthMessage);
+            clearTimeout(authTimeout);
+            setCalendarSyncState('syncing');
             toast.success("Google Calendar authenticated! Fetching events...");
             await handleSyncGoogleCalendarDirect();
           }
         };
         window.addEventListener('message', handleAuthMessage);
       } else {
+        clearTimeout(authTimeout);
         toast.dismiss(toastId);
+        localStorage.setItem('chronos-calendar-connected', 'true');
         if (data.count > 0) {
-          toast.success(`Synced Google Calendar: Imported ${data.count} Locked Exams.`);
+          toast.success(`Synced Google Calendar: Imported ${data.count} Locked Tasks.`);
         } else {
           toast.info("Google Calendar is up to date.");
         }
         fetchTasks();
+        setCalendarSyncState('idle');
       }
     } catch (e) {
+      clearTimeout(authTimeout);
       toast.dismiss(toastId);
-      toast.error("Google Calendar sync failed.");
+      toast.error("Google Calendar sync failed or timed out.");
+      setCalendarSyncState('idle');
     }
   };
 
@@ -1993,7 +2283,7 @@ Consider the operator's digital twin profile: ${performanceTwin}.${tasksInfo}`;
         method: "DELETE"
       });
       const filtered = tasks.filter(t => t.id !== id);
-      setTasks(filtered);
+      replaceTasks(filtered);
       toast.info("Task threat dismissed.");
     } catch (err) {
       toast.error("Failed to delete task.");
@@ -2009,7 +2299,11 @@ Consider the operator's digital twin profile: ${performanceTwin}.${tasksInfo}`;
       });
       if (!res.ok) throw new Error("Update complete status failed");
       const updated = await res.json();
-      setTasks(prev => prev.map(t => t.id === task.id ? updated : t));
+      setTasks(prev => {
+        const next = prev.map(t => t.id === task.id ? updated : t);
+        cacheTasks(next);
+        return next;
+      });
       toast.success(updated.completed ? "Deadline defended! Task secured." : "Task reopened for monitoring.");
     } catch (err) {
       toast.error("Failed to update status.");
@@ -2017,24 +2311,30 @@ Consider the operator's digital twin profile: ${performanceTwin}.${tasksInfo}`;
   };
 
   const triggerAiRescue = async (task: Task) => {
+    if (rescueLoading) return;
     setRescuingTaskId(task.id);
     setRescueLoading(true);
-    setRescuePlan("");
     setRescueData(task);
+    setRescueBriefing(null);
+    setRescueError(null);
     setRecoveryChatHistory([]);
 
     try {
-      const res = await fetch(`${API_BASE}/api/tasks/${task.id}/rescue`, {
+      const res = await fetchWithTimeout(`${API_BASE}/api/tasks/${task.id}/rescue`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ twinProfile: performanceTwin, aiConfig: aiConfig })
-      });
-      
-      if (!res.ok) throw new Error("Rescue failed");
+      }, 60000);
+
+      if (!res.ok) throw new Error(`Rescue failed with status ${res.status}`);
       const updatedTask = await res.json();
-      
+
       // Update local state
-      setTasks(prev => prev.map(t => t.id === task.id ? updatedTask : t));
+      setTasks(prev => {
+        const next = prev.map(t => t.id === task.id ? updatedTask : t);
+        cacheTasks(next);
+        return next;
+      });
       setRescueData(updatedTask);
 
       const resources = updatedTask.rescueResources;
@@ -2042,26 +2342,15 @@ Consider the operator's digital twin profile: ${performanceTwin}.${tasksInfo}`;
         { role: 'assistant', content: `Hello, ${username}! I have initialized the temporal recovery protocol for "${task.title}". The success forecast is ${resources.recoveryProbability}%. Let's review the checklist. How should we optimize it?` }
       ]);
 
-      const planMd = `### 🚨 RECOVERY PROTOCOL INITIALIZED
+      const briefing = updatedTask.recoveryBriefing;
+      if (briefing) {
+        setRescueBriefing(briefing);
+      }
 
-#### 📈 Forecast Metrics Comparison
-- **PREVIOUS SURVIVAL**: ${task.survivalScore}%
-- **RECOVERY SUCCESS FORECAST**: ${resources.recoveryProbability}%
-- **NEW POINT OF NO RETURN**: ${updatedTask.newPointOfNoReturn}
-
-#### 🎯 Micro-task Action Breakdown
-${resources.checklist.map((c: string, idx: number) => `${idx + 1}. **${c}**`).join('\n')}
-
-#### 🛡️ AI Starter Outline Assets
-- ${resources.starters.join('\n- ')}
-
-*Protocol status: active focus locks applied.*`;
-
-      setRescuePlan(planMd);
       speakVoice(`Recovery protocol applied. Success forecast is now ${resources.recoveryProbability} percent. New point of no return is ${updatedTask.newPointOfNoReturn}.`);
-    } catch (err) {
-      console.warn("Rescue failed, falling back locally:", err);
-      setRescuePlan("### 🚨 Recovery protocol offline. Check API Core logs.");
+    } catch (err: any) {
+      console.warn("Rescue failed:", err);
+      setRescueError(err?.message || "Failed to generate recovery protocol. The AI Core may be offline or the request timed out.");
     } finally {
       setRescueLoading(false);
     }
@@ -2086,27 +2375,94 @@ The user wants to negotiate or refine the recovery plan checklist.
 Work with them to adjust the micro-steps so they can finish within their estimated work hours and available timeframe.
 Always format your responses with the modified checklist inside a JSON-like array block: [NEW_CHECKLIST: ["Step 1", "Step 2", ...]] so the system can parse it, and explain why this plan will work. Keep responses under 3 sentences.`;
 
+    const provider = aiConfig?.provider || 'gemini';
+    const useStreaming = provider === 'nvidia';
+
     try {
-      const res = await fetch(`${API_BASE}/api/ai/chat`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          provider: aiConfig?.provider || 'gemini',
-          apiUrl: aiConfig?.apiUrl,
-          apiKey: aiConfig?.apiKey,
-          model: aiConfig?.model,
-          messages: [
-            { role: 'system', content: SYSTEM_RESCUE_PROMPT },
-            ...updatedHistory
-          ]
-        })
-      });
+      let reply = '';
 
-      if (!res.ok) throw new Error("AI request failed");
-      const data = await res.json();
-      let reply = data.content || "";
+      if (useStreaming) {
+        // Add empty assistant message that will be filled progressively
+        setRecoveryChatHistory(prev => [...prev, { role: 'assistant' as const, content: '' }]);
 
-      // Parse NEW_CHECKLIST tag
+        const abortController = new AbortController();
+        const res = await fetch(`${API_BASE}/api/ai/chat/stream`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            apiUrl: aiConfig?.apiUrl,
+            apiKey: aiConfig?.apiKey,
+            model: aiConfig?.model,
+            messages: [
+              { role: 'system', content: SYSTEM_RESCUE_PROMPT },
+              ...updatedHistory
+            ]
+          }),
+          signal: abortController.signal
+        });
+
+        if (!res.ok) throw new Error("Stream request failed");
+        if (!res.body) throw new Error("No response body");
+
+        const reader = res.body.getReader();
+        const decoder = new TextDecoder();
+        let buffer = '';
+
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+
+          buffer += decoder.decode(value, { stream: true });
+          const lines = buffer.split('\n');
+          buffer = lines.pop() || '';
+
+          for (const line of lines) {
+            if (line.startsWith('data: ')) {
+              const data = line.slice(6).trim();
+              if (data === '[DONE]') continue;
+              try {
+                const parsed = JSON.parse(data);
+                const chunk = parsed.choices?.[0]?.delta?.content || '';
+                if (chunk) {
+                  reply += chunk;
+                  // Update the last assistant message in-place
+                  setRecoveryChatHistory(prev => {
+                    const copy = [...prev];
+                    copy[copy.length - 1] = { role: 'assistant', content: reply };
+                    return copy;
+                  });
+                }
+              } catch { /* skip malformed */ }
+            }
+          }
+        }
+      } else {
+        const res = await fetch(`${API_BASE}/api/ai/chat`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            provider,
+            apiUrl: aiConfig?.apiUrl,
+            apiKey: aiConfig?.apiKey,
+            model: aiConfig?.model,
+            messages: [
+              { role: 'system', content: SYSTEM_RESCUE_PROMPT },
+              ...updatedHistory
+            ]
+          })
+        });
+
+        if (!res.ok) throw new Error("AI request failed");
+        const data = await res.json();
+        reply = data.content || "";
+
+        setRecoveryChatHistory(prev => [
+          ...prev,
+          { role: 'assistant', content: reply }
+        ]);
+      }
+
+      // Parse NEW_CHECKLIST tag from final reply
       const match = reply.match(/\[NEW_CHECKLIST:\s*(\[[\s\S]*?\])\]/);
       if (match) {
         try {
@@ -2121,88 +2477,99 @@ Always format your responses with the modified checklist inside a JSON-like arra
                   checklist: newList
                 }
               };
-              // Persist checklist to this task in local database
               fetch(`${API_BASE}/api/tasks/${prev.id}`, {
                 method: "PUT",
                 headers: { "Content-Type": "application/json" },
                 body: JSON.stringify({ rescueResources: updated.rescueResources })
               }).catch(err => console.warn("Failed to save updated checklist to db", err));
-              
               return updated;
             });
             
-            setTasks(prevTasks => prevTasks.map(t => t.id === rescueData.id ? {
-              ...t,
-              rescueResources: {
-                ...t.rescueResources,
-                checklist: newList
-              }
-            } : t));
+            setTasks(prevTasks => {
+              const next = prevTasks.map(t => t.id === rescueData.id ? {
+                ...t,
+                rescueResources: {
+                  ...t.rescueResources,
+                  checklist: newList
+                }
+              } : t);
+              cacheTasks(next);
+              return next;
+            });
           }
         } catch (e) {
           console.error("Failed to parse checklist JSON", e);
         }
-        reply = reply.replace(/\[NEW_CHECKLIST:\s*(\[[\s\S]*?\])\]/, '').trim();
+        // Clean up the reply display
+        const cleanedReply = reply.replace(/\[NEW_CHECKLIST:\s*(\[[\s\S]*?\])\]/, '').trim();
+        setRecoveryChatHistory(prev => {
+          const copy = [...prev];
+          const last = copy[copy.length - 1];
+          if (last.role === 'assistant') {
+            copy[copy.length - 1] = { role: 'assistant', content: cleanedReply };
+          }
+          return copy;
+        });
       }
-
-      setRecoveryChatHistory(prev => [
-        ...prev,
-        { role: 'assistant', content: reply }
-      ]);
     } catch (err: any) {
       console.error("Recovery chat failed:", err);
-      setRecoveryChatHistory(prev => [
-        ...prev,
-        { role: 'assistant', content: `[Error: Connection Interrupted] I was unable to compile an update. Please check that your AI Supplier is online.` }
-      ]);
+      if (!useStreaming || !err.message?.includes('aborted')) {
+        setRecoveryChatHistory(prev => [
+          ...prev,
+          { role: 'assistant', content: `[Error: Connection Interrupted] I was unable to compile an update. Please check that your AI Supplier is online.` }
+        ]);
+      }
     } finally {
       setRecoveryChatLoading(false);
     }
   };
 
   const handleOpenEstimationAssistant = async () => {
-    setShowEstimationAssistant(true);
-    if (estChatHistory.length === 0) {
-      setEstChatLoading(true);
-      try {
-        const taskTitle = newTitle.trim() || "Untitled Task";
+    setEstChatHistory([]);
+    setSuggestedEstimate(null);
+    setHasCompletedAiEstimation(false);
+    setEstChatLoading(true);
+    const sessionId = ++estSessionIdRef.current;
 
-        // Calculate precise net productive hours available for the user
-        let netProductiveHoursText = "unknown/not specified";
-        if (newDue) {
-          const now = new Date();
-          const due = new Date(newDue);
-          const diffMs = due.getTime() - now.getTime();
-          if (diffMs > 0) {
-            const totalHours = diffMs / (1000 * 60 * 60);
-            
-            let sleepHours = 0;
-            const temp = new Date(now);
-            const sleepStartHour = sleepStart !== undefined ? Number(sleepStart) : 23;
-            const sleepEndHour = sleepEnd !== undefined ? Number(sleepEnd) : 7;
-            const sleepSet = new Set<number>();
-            let h = sleepStartHour;
-            while (h !== sleepEndHour) {
-              sleepSet.add(h);
-              h = (h + 1) % 24;
-            }
-            
-            while (temp < due) {
-              if (sleepSet.has(temp.getHours())) {
-                sleepHours += 0.5;
-              }
-              temp.setMinutes(temp.getMinutes() + 30);
-            }
-            
-            const eatingOverhead = 2.0 * (totalHours / 24.0);
-            const miscOverhead = 1.5 * (totalHours / 24.0);
-            const netHours = Math.max(0.1, totalHours - sleepHours - eatingOverhead - miscOverhead);
-            
-            netProductiveHoursText = `${netHours.toFixed(1)} productive hours (Total calendar time left: ${totalHours.toFixed(1)}h, Sleep: ${sleepHours.toFixed(1)}h, Eating: ${eatingOverhead.toFixed(1)}h, Misc: ${miscOverhead.toFixed(1)}h)`;
+    try {
+      const taskTitle = newTitle.trim() || "Untitled Task";
+
+      // Calculate precise net productive hours available for the user
+      let netProductiveHoursText = "unknown/not specified";
+      if (newDue) {
+        const now = new Date();
+        const due = new Date(newDue);
+        const diffMs = due.getTime() - now.getTime();
+        if (diffMs > 0) {
+          const totalHours = diffMs / (1000 * 60 * 60);
+          
+          let sleepHours = 0;
+          const temp = new Date(now);
+          const sleepStartHour = sleepStart !== undefined ? Number(sleepStart) : 23;
+          const sleepEndHour = sleepEnd !== undefined ? Number(sleepEnd) : 7;
+          const sleepSet = new Set<number>();
+          let h = sleepStartHour;
+          while (h !== sleepEndHour) {
+            sleepSet.add(h);
+            h = (h + 1) % 24;
           }
+          
+          while (temp < due) {
+            if (sleepSet.has(temp.getHours())) {
+              sleepHours += 0.5;
+            }
+            temp.setMinutes(temp.getMinutes() + 30);
+          }
+          
+          const eatingOverhead = 2.0 * (totalHours / 24.0);
+          const miscOverhead = 1.5 * (totalHours / 24.0);
+          const netHours = Math.max(0.1, totalHours - sleepHours - eatingOverhead - miscOverhead);
+          
+          netProductiveHoursText = `${netHours.toFixed(1)} productive hours (Total calendar time left: ${totalHours.toFixed(1)}h, Sleep: ${sleepHours.toFixed(1)}h, Eating: ${eatingOverhead.toFixed(1)}h, Misc: ${miscOverhead.toFixed(1)}h)`;
         }
+      }
 
-        const systemPrompt = `You are the Chronos Task Intake Assistant.
+      const systemPrompt = `You are the Chronos Task Intake Assistant.
 The user is planning a task titled "${taskTitle}".
 Current local time is: ${new Date().toLocaleString('en-GB')}.
 Task Deadline (due): ${newDue ? new Date(newDue).toLocaleString('en-GB') : 'not specified'}.
@@ -2214,30 +2581,36 @@ In your very first message:
 2. Ask a targeted diagnostic question about the task's complexity, scope, or blockers.
 Keep your response short, engaging, and under 2-3 sentences.`;
 
-        const res = await fetch(`${API_BASE}/api/ai/chat`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            provider: aiConfig?.provider || 'gemini',
-            apiUrl: aiConfig?.apiUrl,
-            apiKey: aiConfig?.apiKey,
-            model: aiConfig?.model,
-            messages: [
-              { role: 'system', content: systemPrompt }
-            ]
-          })
-        });
+      const res = await fetchWithTimeout(`${API_BASE}/api/ai/chat`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          provider: aiConfig?.provider || 'gemini',
+          apiUrl: aiConfig?.apiUrl,
+          apiKey: aiConfig?.apiKey,
+          model: aiConfig?.model,
+          messages: [
+            { role: 'system', content: systemPrompt }
+          ]
+        })
+      }, 60000);
 
-        if (!res.ok) throw new Error("AI request failed");
-        const data = await res.json();
-        setEstChatHistory([
-          { role: 'assistant', content: data.content || `I see you are working on "${taskTitle}". Could you give me a brief about this task and what complexity you expect?` }
-        ]);
-      } catch (err) {
-        setEstChatHistory([
-          { role: 'assistant', content: `I see you are working on "${newTitle || "Untitled Task"}". Could you give me a brief about this task and what complexity you expect?` }
-        ]);
-      } finally {
+      if (estSessionIdRef.current !== sessionId) return;
+      if (!res.ok) throw new Error("AI request failed");
+      const data = await res.json();
+      if (estSessionIdRef.current !== sessionId) return;
+      setEstChatHistory([
+        { role: 'assistant', content: data.content || `I see you are working on "${taskTitle}". Could you give me a brief about this task and what complexity you expect?` }
+      ]);
+      setShowEstimationAssistant(true);
+    } catch (err) {
+      if (estSessionIdRef.current !== sessionId) return;
+      setEstChatHistory([
+        { role: 'assistant', content: `I see you are working on "${newTitle || "Untitled Task"}". Could you give me a brief about this task and what complexity you expect?` }
+      ]);
+      setShowEstimationAssistant(true);
+    } finally {
+      if (estSessionIdRef.current === sessionId) {
         setEstChatLoading(false);
       }
     }
@@ -2364,7 +2737,7 @@ INTAKE PROCESS PROTOCOL:
    - The brief complete signal: [BRIEF_COMPLETE: true]`;
 
     try {
-      const res = await fetch(`${API_BASE}/api/ai/chat`, {
+      const res = await fetchWithTimeout(`${API_BASE}/api/ai/chat`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -2377,7 +2750,7 @@ INTAKE PROCESS PROTOCOL:
             ...updatedHistory
           ]
         })
-      });
+      }, 60000);
 
       if (!res.ok) throw new Error("AI request failed");
       const data = await res.json();
@@ -2436,11 +2809,10 @@ INTAKE PROCESS PROTOCOL:
         const t3 = (finalEst * 0.25).toFixed(1);
         const t4 = (finalEst * 0.35).toFixed(1);
 
-        let criticalPathItems = ["Autonomous Agent", "Voice Companion", "Google Cloud Deployment", "End-to-End Testing"];
-        const userText = updatedHistory.map(m => m.content).join(" ").toLowerCase();
-        if (userText.includes("gemini")) {
-          criticalPathItems = ["Gemini AI Refinement", "Voice Companion", "Google Cloud Deployment", "End-to-End Testing"];
-        }
+        const taskTitleLower = (newTitle || "").toLowerCase();
+        const criticalPathItems = taskTitleLower.includes("gemini")
+          ? ["Gemini AI Refinement", "Voice Companion", "Google Cloud Deployment", "End-to-End Testing"]
+          : [`Core ${newTitle || "task"} execution`, "Testing & validation", "Review and polish", "Final submission"];
 
         reply = `━━━━━━━━━━━━━━━━━━━━━━━━━━
 ### MISSION ANALYSIS COMPLETE
@@ -2449,16 +2821,14 @@ INTAKE PROCESS PROTOCOL:
 # ${rangeMin}–${rangeMax} Hours
 
 **Confidence**
-89%
+AI Analysis Unavailable
 
 **Complexity**
-High
+N/A
 
 **Reasoning**
-* Core functionality is complete.
-* Remaining work is integration-heavy.
-* Deployment and testing dominate the critical path.
-* No major architectural work detected.
+* AI Core is offline. No risk analysis generated.
+* Estimate is based on user-provided scope only.
 
 **Critical Path**
 * ${criticalPathItems[0]}
@@ -2472,10 +2842,7 @@ High
 * **${criticalPathItems[2]}**: ${t3}h
 * **${criticalPathItems[3]}**: ${t4}h
 
-**Mission Risk**
-**Medium**
-
-Your current plan is achievable if no major integration issues occur. Avoid introducing new features. Focus exclusively on deployment, testing, and demonstration quality.
+Your current plan is achievable based on the estimated hours alone. Re-run the AI Summarizer when the AI Core is online for confidence and risk analysis.
 ━━━━━━━━━━━━━━━━━━━━━━━━━━
 [Briefing completed. Add Task button is now unlocked and suggestion applied.]`;
       }
@@ -2535,11 +2902,10 @@ Your current plan is achievable if no major integration issues occur. Avoid intr
         const t3 = (finalEst * 0.25).toFixed(1);
         const t4 = (finalEst * 0.35).toFixed(1);
 
-        let criticalPathItems = ["Autonomous Agent", "Voice Companion", "Google Cloud Deployment", "End-to-End Testing"];
-        const userText = updatedHistory.map(m => m.content).join(" ").toLowerCase();
-        if (userText.includes("gemini")) {
-          criticalPathItems = ["Gemini AI Refinement", "Voice Companion", "Google Cloud Deployment", "End-to-End Testing"];
-        }
+        const taskTitleLower = (newTitle || "").toLowerCase();
+        const criticalPathItems = taskTitleLower.includes("gemini")
+          ? ["Gemini AI Refinement", "Voice Companion", "Google Cloud Deployment", "End-to-End Testing"]
+          : [`Core ${newTitle || "task"} execution`, "Testing & validation", "Review and polish", "Final submission"];
 
         reply = `━━━━━━━━━━━━━━━━━━━━━━━━━━
 ### MISSION ANALYSIS COMPLETE
@@ -2548,16 +2914,14 @@ Your current plan is achievable if no major integration issues occur. Avoid intr
 # ${rangeMin}–${rangeMax} Hours
 
 **Confidence**
-89%
+AI Analysis Unavailable
 
 **Complexity**
-High
+N/A
 
 **Reasoning**
-* Core functionality is complete.
-* Remaining work is integration-heavy.
-* Deployment and testing dominate the critical path.
-* No major architectural work detected.
+* AI Core is offline. No risk analysis generated.
+* Estimate is based on user-provided scope only.
 
 **Critical Path**
 * ${criticalPathItems[0]}
@@ -2571,10 +2935,7 @@ High
 * **${criticalPathItems[2]}**: ${t3}h
 * **${criticalPathItems[3]}**: ${t4}h
 
-**Mission Risk**
-**Medium**
-
-Your current plan is achievable if no major integration issues occur. Avoid introducing new features. Focus exclusively on deployment, testing, and demonstration quality.
+Your current plan is achievable based on the estimated hours alone. Re-run the AI Summarizer when the AI Core is online for confidence and risk analysis.
 ━━━━━━━━━━━━━━━━━━━━━━━━━━
 [Briefing completed. Add Task button is now unlocked and suggestion applied.]`;
       }
@@ -2787,37 +3148,10 @@ Your current plan is achievable if no major integration issues occur. Avoid intr
       <div 
         className="fixed top-6 right-6 z-40 flex items-center gap-3 transition-all duration-500 ease-out"
       >
-        <div className="relative flex items-center">
-          {aiConnectionStatus === 'offline' && (
-            <div className="absolute inset-0 pointer-events-none z-0 scale-150">
-              <span className="absolute w-1 h-1 bg-red-500 rounded-full animate-ping opacity-60" style={{ top: '-6px', left: '50%', animationDelay: '0s' }} />
-              <span className="absolute w-1 h-1 bg-red-500 rounded-full animate-ping opacity-45" style={{ bottom: '-6px', right: '15%', animationDelay: '0.4s' }} />
-              <span className="absolute w-1 h-1 bg-red-500 rounded-full animate-ping opacity-30" style={{ left: '-6px', top: '30%', animationDelay: '0.8s' }} />
-            </div>
-          )}
-          
-          <button
-            onClick={() => setOpenSettings(!openSettings)}
-            className={`p-2 rounded-xl bg-white/5 border border-white/10 hover:bg-purple-950/20 text-gray-400 hover:text-white transition-all cursor-pointer flex items-center justify-center hover:rotate-90 duration-300 focus:outline-none z-10 ${
-              aiConnectionStatus === 'offline' 
-                ? 'border-red-500/40 hover:border-red-500/70 hover:shadow-[0_0_15px_rgba(239,68,68,0.25)]' 
-                : 'hover:border-[#8A2BE2]/40 hover:shadow-[0_0_15px_rgba(138,43,226,0.15)]'
-            }`}
-            title="System Configuration"
-          >
-            <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-              <circle cx="12" cy="12" r="3"></circle>
-              <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"></path>
-            </svg>
-          </button>
-          
-          {aiConnectionStatus === 'offline' && (
-            <span className="absolute -top-1 -right-1 flex h-2.5 w-2.5">
-              <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-red-400 opacity-75"></span>
-              <span className="relative inline-flex rounded-full h-2.5 w-2.5 bg-red-500" title="Core Supplier Offline"></span>
-            </span>
-          )}
-        </div>
+        <SettingsGear
+          isOffline={aiConnectionStatus === 'offline'}
+          onClick={() => setOpenSettings(!openSettings)}
+        />
       </div>
 
       <div 
@@ -3089,7 +3423,15 @@ Your current plan is achievable if no major integration issues occur. Avoid intr
           </div>
         </main>
       ) : (
-        <main className="flex-1 p-6 relative z-10 w-full grid grid-cols-1 lg:grid-cols-12 gap-6 items-stretch max-w-full lg:px-8">
+        <main className="flex-1 p-6 relative z-10 w-full max-w-full lg:px-8">
+          {aiConnectionStatus === 'offline' && (
+            <div className="mb-4 flex items-center gap-2 px-4 py-2 bg-amber-500/10 border border-amber-500/30 rounded-xl">
+              <span className="text-amber-400 text-[10px] font-mono font-bold uppercase tracking-wider">
+                ⚠ AI unavailable — Local dashboard remains operational
+              </span>
+            </div>
+          )}
+          <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-stretch">
         
         {/* Left Side: Twin Core & AI Config (Centered constants) */}
         <section className="lg:col-span-3 space-y-6 w-full flex flex-col justify-start">
@@ -3198,8 +3540,8 @@ Your current plan is achievable if no major integration issues occur. Avoid intr
                 )}
               </span>
               
-              {/* Fallback voice recording button */}
-              {(resolvedState === 'offline' || aiConnectionStatus === 'offline') && (
+              {/* Fallback voice recording button — only shown when AI is online */}
+              {aiConnectionStatus === 'online' && resolvedState !== 'offline' && (
                 <button
                   type="button"
                   onClick={startBrowserRecognition}
@@ -3234,29 +3576,43 @@ Your current plan is achievable if no major integration issues occur. Avoid intr
             </div>
 
             {tasksLoading ? (
-              <div className="flex-1 flex flex-col items-center justify-center p-8 bg-[#0B0C10]/60 border border-gray-900/40 rounded-3xl backdrop-blur-sm space-y-4">
-                <div className="relative w-16 h-16 flex items-center justify-center">
-                  <div className="absolute inset-0 rounded-full border border-[#66FCF1]/20 animate-pulse" />
-                  <div className="absolute inset-1 rounded-full border-t-2 border-r-2 border-[#0099FF] animate-spin" />
-                  <span className="text-xl animate-pulse">🛡️</span>
-                </div>
-                <div className="text-center space-y-2">
-                  <p className="text-[10px] font-mono text-[#66FCF1] uppercase tracking-widest animate-pulse">
-                    Scanning active temporal targets...
-                  </p>
-                  <p className="text-[8px] font-mono text-gray-500 uppercase tracking-wider animate-pulse">
-                    Querying defense nodes and survival indexes
+              tasksLoadingSlow ? (
+                <div className="flex-1 flex flex-col items-center justify-center p-8 bg-[#0B0C10]/60 border border-gray-900/40 rounded-3xl backdrop-blur-sm space-y-4">
+                  <div className="w-full max-w-md space-y-3 animate-pulse">
+                    <div className="h-14 bg-white/5 rounded-xl" />
+                    <div className="h-14 bg-white/5 rounded-xl" />
+                    <div className="h-14 bg-white/5 rounded-xl w-3/4" />
+                  </div>
+                  <p className="text-[9px] font-mono text-gray-500 uppercase tracking-wider">
+                    Loading mission data...
                   </p>
                 </div>
-                <div className="w-48 h-[3px] bg-white/5 rounded-full overflow-hidden relative">
-                  <div className="absolute top-0 bottom-0 left-0 bg-gradient-to-r from-[#0099FF] to-[#8A2BE2] w-1/3 rounded-full animate-[scannerSweep_1.8s_ease-in-out_infinite]" />
-                </div>
+              ) : null
+            ) : tasksError ? (
+              <div className="flex-1 flex flex-col items-center justify-center text-center p-8 bg-[#0B0C10]/60 border border-red-900/30 rounded-3xl backdrop-blur-sm space-y-4">
+                <span className="text-2xl">⚠️</span>
+                <p className="text-xs text-red-400 uppercase tracking-widest font-bold">
+                  Mission Data Unavailable
+                </p>
+                <p className="text-[9px] font-mono text-gray-500 max-w-xs">
+                  {tasksError}
+                </p>
+                <button
+                  type="button"
+                  onClick={fetchTasks}
+                  className="px-4 py-2 rounded-xl bg-[#8A2BE2]/20 border border-[#8A2BE2]/40 text-purple-300 font-mono text-[9px] uppercase tracking-wider hover:bg-[#8A2BE2]/30 transition-all cursor-pointer"
+                >
+                  Retry Load
+                </button>
               </div>
             ) : tasks.length === 0 ? (
-              <div className="flex-1 flex flex-col items-center justify-center text-center p-8 bg-[#0B0C10]/60 border border-dashed border-gray-800 rounded-3xl backdrop-blur-sm">
-                <span className="text-3xl block mb-3">🛡️</span>
+              <div className="flex-1 flex flex-col items-center justify-center text-center p-8 bg-[#0B0C10]/60 border border-dashed border-gray-800 rounded-3xl backdrop-blur-sm space-y-3">
+                <span className="text-3xl">🛡️</span>
                 <p className="text-xs text-gray-500 uppercase tracking-widest font-bold">
-                  No active threats detected. All deadlines secure.
+                  No Active Missions
+                </p>
+                <p className="text-[9px] font-mono text-gray-600 max-w-xs">
+                  Tasks you create will appear here. Use Chronos to plan and defend your time.
                 </p>
               </div>
             ) : (
@@ -3617,11 +3973,12 @@ Your current plan is achievable if no major integration issues occur. Avoid intr
             )}
           </section>
         )}
+          </div>{/* end grid */}
       </main>
       )}
       {rescuingTaskId && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-md p-4 transition-all duration-300">
-          <div className="relative w-full max-w-4xl bg-[#0B0C10]/95 rounded-3xl border border-[#8A2BE2]/30 p-6 md:p-8 shadow-[0_15px_50px_rgba(138,43,226,0.3)] backdrop-blur-xl space-y-6 animate-in fade-in zoom-in-95 duration-200">
+          <div className="relative w-full max-w-4xl bg-[#0B0C10]/95 rounded-3xl border border-[#8A2BE2]/30 p-6 md:p-8 shadow-[0_15px_50px_rgba(138,43,226,0.3)] backdrop-blur-xl space-y-5 animate-in fade-in zoom-in-95 duration-200">
             <div className="flex justify-between items-center border-b border-gray-900 pb-3">
               <div>
                 <h3 className="text-base font-bold uppercase tracking-widest text-[#8A2BE2]">
@@ -3640,63 +3997,32 @@ Your current plan is achievable if no major integration issues occur. Avoid intr
             </div>
 
             {rescueLoading ? (
-              <div className="flex flex-col items-center justify-center py-24 space-y-4">
-                <div className="w-10 h-10 border-t-2 border-b-2 border-[#8A2BE2] rounded-full animate-spin" />
-                <p className="text-xs text-gray-500 animate-pulse uppercase tracking-widest font-bold font-mono">
-                  Recovery Agent compiling rescue resources...
-                </p>
-              </div>
-            ) : (
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-6 items-stretch">
-                {/* Left Column: Forecasts & Checklist */}
-                <div className="space-y-4 flex flex-col justify-between">
-                  <div className="space-y-4">
-                    {rescueData && (
-                      <div className="grid grid-cols-2 gap-4 bg-black/40 border border-white/5 p-4 rounded-2xl text-center">
-                        <div className="border-r border-white/5 space-y-1">
-                          <span className="text-[8px] text-red-500 uppercase tracking-widest block font-bold font-mono">Before Recovery</span>
-                          <div className="text-lg font-bold text-red-400">31% Survival</div>
-                        </div>
-                        <div className="space-y-1">
-                          <span className="text-[8px] text-[#66FCF1] uppercase tracking-widest block font-bold font-mono">After Recovery</span>
-                          <div className="text-lg font-bold text-[#66FCF1]">{rescueData.recoveryForecast || 78}% Success</div>
-                        </div>
-                      </div>
-                    )}
-
-                    <div className="bg-[#1F2833]/30 border border-gray-800 p-5 rounded-2xl space-y-3 font-sans">
-                      <h4 className="text-xs font-bold uppercase text-[#66FCF1] tracking-wider border-b border-white/5 pb-1 flex items-center gap-1.5">
-                        <span>🎯</span> Active Recovery Checklist
-                      </h4>
-                      {rescueData?.rescueResources?.checklist ? (
-                        <ul className="space-y-2 text-xs text-gray-300 font-mono">
-                          {rescueData.rescueResources.checklist.map((item: string, idx: number) => (
-                            <li key={idx} className="flex items-start gap-2 bg-black/20 p-2.5 rounded-xl border border-white/5">
-                              <span className="text-[#8A2BE2] font-bold">{idx + 1}.</span>
-                              <span>{item}</span>
-                            </li>
-                          ))}
-                        </ul>
-                      ) : (
-                        <p className="text-xs text-gray-500 italic">No checklist loaded.</p>
-                      )}
-                    </div>
-                  </div>
-
-                  {rescueData && (
-                    <div className="text-[9px] font-mono text-gray-500 uppercase tracking-wider bg-black/30 p-3 rounded-xl border border-white/5">
-                      New Point Of No Return: <span className="text-[#bf5af2] font-bold">{rescueData.newPointOfNoReturn || "Extended"}</span>
-                    </div>
-                  )}
+              <RecoveryLoadingPipeline isActive={rescueLoading} />
+            ) : rescueError ? (
+              <div className="flex flex-col items-center justify-center py-12 space-y-4">
+                <div className="w-10 h-10 rounded-full border-2 border-red-500/40 flex items-center justify-center">
+                  <span className="text-red-400 text-lg">⚠</span>
                 </div>
+                <p className="text-xs text-red-300 font-mono text-center max-w-sm">{rescueError}</p>
+                <button
+                  onClick={() => rescueData && triggerAiRescue(rescueData)}
+                  disabled={rescueLoading}
+                  className="px-4 py-2 rounded-lg bg-red-950/40 border border-red-500/40 text-red-300 hover:bg-red-900/40 text-[10px] font-bold uppercase tracking-wider transition-all cursor-pointer disabled:opacity-40"
+                >
+                  Retry Recovery Protocol
+                </button>
+              </div>
+            ) : rescueBriefing ? (
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-6 items-stretch max-h-[70vh] overflow-y-auto custom-scrollbar pr-1">
+                <RecoveryBriefing briefing={rescueBriefing} />
 
                 {/* Right Column: Negotiation Chat */}
-                <div className="border border-gray-800 bg-black/30 rounded-2xl p-4 flex flex-col justify-between h-[360px] font-sans">
+                <div className="border border-gray-800 bg-black/30 rounded-2xl p-4 flex flex-col justify-between h-[420px] font-sans">
                   <div className="text-[10px] font-mono text-gray-500 uppercase tracking-widest border-b border-white/5 pb-1.5 mb-2">
                     💬 Collaborate with Recovery Agent
                   </div>
 
-                  <div className="flex-1 overflow-y-auto space-y-2.5 pr-1 scrollbar-thin text-xs mb-2">
+                  <div ref={recoveryChatEndRef} className="flex-1 overflow-y-auto space-y-2.5 pr-1 scrollbar-thin text-xs mb-2">
                     {recoveryChatHistory.map((msg, idx) => (
                       <div key={idx} className={`p-2.5 rounded-xl max-w-[85%] leading-relaxed ${
                         msg.role === 'user'
@@ -3730,9 +4056,100 @@ Your current plan is achievable if no major integration issues occur. Avoid intr
                   </form>
                 </div>
               </div>
-            )}
+            ) : rescueData ? (
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-6 items-stretch">
+                <div className="space-y-4 flex flex-col justify-between">
+                  <div className="space-y-4">
+                    <div className="grid grid-cols-2 gap-4 bg-black/40 border border-white/5 p-4 rounded-2xl text-center">
+                      <div className="border-r border-white/5 space-y-1">
+                        <span className="text-[8px] text-red-500 uppercase tracking-widest block font-bold font-mono">Before Recovery</span>
+                        <div className="text-lg font-bold text-red-400">{rescueData.survivalScoreBeforeRecovery ?? rescueData.survivalScore ?? 31}% Survival</div>
+                      </div>
+                      <div className="space-y-1">
+                        <span className="text-[8px] text-[#66FCF1] uppercase tracking-widest block font-bold font-mono">After Recovery</span>
+                        <div className="text-lg font-bold text-[#66FCF1]">{rescueData.recoveryForecast ?? rescueData.survivalScore ?? 78}% Success</div>
+                      </div>
+                    </div>
 
-            {!rescueLoading && (
+                    <div className="bg-[#1F2833]/30 border border-gray-800 p-5 rounded-2xl space-y-3 font-sans">
+                      <h4 className="text-xs font-bold uppercase text-[#66FCF1] tracking-wider border-b border-white/5 pb-1 flex items-center gap-1.5">
+                        <span>🎯</span> Active Recovery Checklist
+                      </h4>
+                      {rescueData.rescueResources?.checklist?.length ? (
+                        <ul className="space-y-2 text-xs text-gray-300 font-mono">
+                          {rescueData.rescueResources.checklist.map((item: string, idx: number) => (
+                            <li key={idx} className="flex items-start gap-2 bg-black/20 p-2.5 rounded-xl border border-white/5">
+                              <span className="text-[#8A2BE2] font-bold">{idx + 1}.</span>
+                              <span>{item}</span>
+                            </li>
+                          ))}
+                        </ul>
+                      ) : (
+                        <div className="space-y-2 text-xs text-gray-500 font-mono">
+                          <p>Recovery checklist is still compiling.</p>
+                          <button
+                            type="button"
+                            onClick={() => rescueData && triggerAiRescue(rescueData)}
+                            disabled={!rescueData || rescueLoading}
+                            className="px-3 py-1.5 rounded-lg bg-amber-500/10 border border-amber-500/30 text-amber-200 disabled:opacity-40"
+                          >
+                            {rescueLoading ? "Compiling..." : "Retry Recovery Build"}
+                          </button>
+                        </div>
+                      )}
+                    </div>
+                  </div>
+
+                  {rescueData && (
+                    <div className="text-[9px] font-mono text-gray-500 uppercase tracking-wider bg-black/30 p-3 rounded-xl border border-white/5">
+                      New Point Of No Return: <span className="text-[#bf5af2] font-bold">{rescueData.newPointOfNoReturn || "Extended"}</span>
+                    </div>
+                  )}
+                </div>
+
+                {/* Right Column: Negotiation Chat */}
+                <div className="border border-gray-800 bg-black/30 rounded-2xl p-4 flex flex-col justify-between h-[360px] font-sans">
+                  <div className="text-[10px] font-mono text-gray-500 uppercase tracking-widest border-b border-white/5 pb-1.5 mb-2">
+                    💬 Collaborate with Recovery Agent
+                  </div>
+
+                  <div ref={recoveryChatEndRef} className="flex-1 overflow-y-auto space-y-2.5 pr-1 scrollbar-thin text-xs mb-2">
+                    {recoveryChatHistory.map((msg, idx) => (
+                      <div key={idx} className={`p-2.5 rounded-xl max-w-[85%] leading-relaxed ${
+                        msg.role === 'user'
+                          ? 'bg-[#8A2BE2]/10 border border-[#8A2BE2]/20 text-purple-200 ml-auto text-right font-mono text-[11px]'
+                          : 'bg-[#1F2833]/40 border border-gray-800 text-cyan-200 mr-auto text-left text-[11px]'
+                      }`}>
+                        {msg.content}
+                      </div>
+                    ))}
+                    {recoveryChatLoading && (
+                      <div className="text-[#06C6B3] font-mono text-[9px] animate-pulse">Agent is updating recovery timeline...</div>
+                    )}
+                  </div>
+
+                  <form onSubmit={handleSendRecoveryChatMessage} className="flex gap-2 border-t border-white/5 pt-2">
+                    <input
+                      type="text"
+                      placeholder="Ask the AI to modify or adjust the checklist steps..."
+                      value={recoveryChatInput}
+                      onChange={e => setRecoveryChatInput(e.target.value)}
+                      disabled={recoveryChatLoading}
+                      className="flex-1 rounded-xl px-3 py-2 text-xs focus:outline-none bg-[#1F2833]/30 text-gray-200 border border-gray-800"
+                    />
+                    <button
+                      type="submit"
+                      disabled={recoveryChatLoading}
+                      className="px-4 py-2 bg-[#8A2BE2] hover:opacity-90 text-white rounded-xl text-xs font-bold uppercase tracking-wider disabled:opacity-50 cursor-pointer"
+                    >
+                      Negotiate
+                    </button>
+                  </form>
+                </div>
+              </div>
+            ) : null}
+
+            {!rescueLoading && !rescueError && (
               <div className="flex justify-between items-center pt-2 border-t border-gray-900">
                 <span className="text-[9px] font-mono text-gray-500 uppercase tracking-widest">
                   🔒 Committing will lock the Todo checklist in the right sidebar.
@@ -3815,7 +4232,7 @@ Your current plan is achievable if no major integration issues occur. Avoid intr
                     </button>
 
                     {showCalendarPicker && (
-                      <div className="absolute top-14 left-0 z-30 w-72 bg-[#0B0C10]/95 border border-[#8A2BE2]/40 rounded-2xl p-4 shadow-[0_10px_30px_rgba(138,43,226,0.3)] backdrop-blur-xl animate-in fade-in slide-in-from-top-2 duration-250 flex flex-col gap-3 font-sans">
+                      <div ref={calendarPickerRef} className="absolute top-14 left-0 z-30 w-72 bg-[#0B0C10]/95 border border-[#8A2BE2]/40 rounded-2xl p-4 shadow-[0_10px_30px_rgba(138,43,226,0.3)] backdrop-blur-xl animate-in fade-in slide-in-from-top-2 duration-250 flex flex-col gap-3 font-sans">
                         {/* Month & Year header */}
                         <div className="flex justify-between items-center border-b border-white/5 pb-2">
                           <button
@@ -3977,26 +4394,42 @@ Your current plan is achievable if no major integration issues occur. Avoid intr
                       </div>
 
                       <div className="flex-1 self-end">
-                        <button
-                          type="button"
-                          disabled={!newTitle.trim()}
-                          onClick={() => {
-                            if (!newTitle.trim()) return;
-                            if (!showEstimationAssistant) {
-                              handleOpenEstimationAssistant();
-                            } else {
-                              setShowEstimationAssistant(false);
-                            }
-                          }}
-                          className={`w-full py-2 rounded-lg text-center text-xs font-bold uppercase focus:outline-none transition-all border ${
-                            newTitle.trim() 
-                              ? 'text-[#06C6B3] border-[#06C6B3]/40 bg-[#06C6B3]/10 hover:bg-[#06C6B3]/20 hover:border-[#06C6B3]/60 cursor-pointer animate-pulse' 
-                              : 'text-gray-600 border-gray-800 bg-transparent cursor-not-allowed opacity-50'
-                          }`}
-                          title={!newTitle.trim() ? 'Enter a task title first' : ''}
-                        >
-                          {showEstimationAssistant ? "✕ Close Summarizer" : "💬 AI Summarizer"}
-                        </button>
+                        {(function() {
+                          const missing: string[] = [];
+                          if (!newTitle.trim()) missing.push("task title");
+                          if (!newDue) missing.push("deadline");
+                          else if (new Date(newDue) <= new Date()) missing.push("valid future deadline");
+                          const estDisabled = missing.length > 0;
+                          const tooltip = missing.length > 0 ? `Requires: ${missing.join(", ")}` : "";
+                          return (
+                            <button
+                              type="button"
+                              disabled={estDisabled}
+                              onClick={() => {
+                                if (estDisabled) {
+                                  toast.error(`Enter ${missing.join(" and ")} to estimate work.`);
+                                  return;
+                                }
+                                 if (!showEstimationAssistant) {
+                                   handleOpenEstimationAssistant();
+                                 } else {
+                                   setShowEstimationAssistant(false);
+                                   setEstChatHistory([]);
+                                   setSuggestedEstimate(null);
+                                   setHasCompletedAiEstimation(false);
+                                 }
+                              }}
+                              className={`w-full py-2 rounded-lg text-center text-xs font-bold uppercase focus:outline-none transition-all border ${
+                                estDisabled
+                                  ? 'text-gray-600 border-gray-800 bg-transparent cursor-not-allowed opacity-50'
+                                  : 'text-[#06C6B3] border-[#06C6B3]/40 bg-[#06C6B3]/10 hover:bg-[#06C6B3]/20 hover:border-[#06C6B3]/60 cursor-pointer animate-pulse'
+                              }`}
+                              title={tooltip}
+                            >
+                              {showEstimationAssistant ? "✕ Close Summarizer" : "💬 AI Summarizer"}
+                            </button>
+                          );
+                        })()}
                       </div>
                     </div>
                   </div>
@@ -4072,114 +4505,16 @@ Your current plan is achievable if no major integration issues occur. Avoid intr
             {showEstimationAssistant && (
               <div className="w-full max-w-sm bg-black/80 border border-white/[0.08] rounded-3xl p-6 shadow-[0_8px_32px_0_rgba(138,43,226,0.3)] backdrop-blur-xl flex flex-col justify-between animate-in slide-in-from-left-5 duration-300 min-h-[450px] relative overflow-hidden">
                 {estChatLoading ? (
-                  <div className="flex flex-col h-full justify-between space-y-4 animate-in fade-in duration-300">
-                    <div className="flex justify-between items-center pb-2 border-b border-white/5 flex-shrink-0">
-                      <div>
-                        <h2 className="text-xs font-bold uppercase tracking-wider text-[#06C6B3] flex items-center gap-1.5 animate-pulse">
-                          <span className="w-1.5 h-1.5 rounded-full bg-[#06C6B3] animate-ping" />
-                          Mission Analysis Active
-                        </h2>
-                        <p className="text-[8px] text-gray-500 uppercase tracking-widest mt-0.5 font-mono">
-                          Core Telemetry Calibration
-                        </p>
-                      </div>
-                      <div className="text-[10px] font-mono text-[#8A2BE2] font-bold">
-                        {Math.round(loaderProgress)}%
-                      </div>
-                    </div>
-
-                    <div className="relative w-full h-[60px] bg-white/5 rounded-2xl border border-white/[0.04] flex items-center justify-between px-4 overflow-hidden flex-shrink-0">
-                      <div className="absolute top-0 bottom-0 left-0 bg-[#0099FF]/10 w-full animate-pulse" />
-                      <div className="absolute top-0 bottom-0 left-0 w-1 bg-gradient-to-b from-transparent via-[#0099FF] to-transparent h-full animate-[scannerSweep_2s_ease-in-out_infinite]" />
-                      
-                      <div className="flex items-center gap-3 relative z-10">
-                        <div className="w-7 h-7 rounded-full border border-[#06C6B3]/40 flex items-center justify-center animate-[spin_4s_linear_infinite] bg-black/40">
-                          <span className="text-[10px]">⚙️</span>
-                        </div>
-                        <div className="space-y-0.5">
-                          <div className="text-[9px] font-mono text-gray-400 uppercase tracking-wider">
-                            Active Stream
-                          </div>
-                          <div className="text-[7px] font-mono text-emerald-400 uppercase tracking-widest animate-pulse">
-                            Processing Packets...
-                          </div>
-                        </div>
-                      </div>
-                      <div className="text-right font-mono text-[9px] text-[#8A2BE2] relative z-10">
-                        LATENCY: 42ms
-                      </div>
-                    </div>
-
-                    <div className="flex-1 overflow-y-auto max-h-[160px] pr-1 space-y-2 custom-scrollbar text-[9px] font-mono select-none">
-                      {[
-                        "Initializing Chronos Core",
-                        "Loading user profile",
-                        "Analyzing productivity patterns",
-                        "Importing calendar context",
-                        "Building behavioral model",
-                        "Running future trajectory simulation",
-                        "Calculating mission complexity",
-                        "Estimating completion probability",
-                        "Generating intervention strategy",
-                        "Finalizing mission briefing"
-                      ].map((stepText, idx) => {
-                        const currentStepIdx = Math.min(9, Math.floor(loaderProgress / 10));
-                        const isCompleted = loaderProgress === 100 || idx < currentStepIdx;
-                        const isActive = loaderProgress < 100 && idx === currentStepIdx;
-                        
-                        if (idx > currentStepIdx && loaderProgress < 100) return null;
-                        
-                        return (
-                          <div key={idx} className={`flex items-center justify-between p-2 rounded-xl border transition-all duration-300 ${
-                            isActive ? 'bg-[#0099FF]/10 border-[#0099FF]/20 text-white' : 'bg-white/5 border-white/[0.02] text-gray-500'
-                          }`}>
-                            <div className="flex items-center gap-2">
-                              {isCompleted ? (
-                                <span className="text-emerald-400 font-bold">✓</span>
-                              ) : isActive ? (
-                                <span className="text-[#0099FF] animate-spin inline-block">⚡</span>
-                              ) : (
-                                <span className="text-gray-700">○</span>
-                              )}
-                              <span className={isCompleted ? 'text-gray-400 line-through' : ''}>
-                                {stepText}
-                              </span>
-                            </div>
-                            {isActive && (
-                              <span className="text-[8px] text-[#0099FF] animate-pulse">
-                                CALIBRATING
-                              </span>
-                            )}
-                          </div>
-                        );
-                      })}
-                    </div>
-
-                    <div className="grid grid-cols-2 gap-2 pt-2 border-t border-white/5 font-mono text-[9px] flex-shrink-0">
-                      <div className="bg-white/5 p-2 rounded-xl border border-white/[0.04]">
-                        <div className="text-gray-500 uppercase text-[7px] tracking-wider">CONFIDENCE</div>
-                        <div className="text-[#06C6B3] font-bold text-xs mt-0.5 transition-all">
-                          {Math.min(89, Math.round(12 + (loaderProgress / 100) * 77))}%
-                        </div>
-                      </div>
-                      <div className="bg-white/5 p-2 rounded-xl border border-white/[0.04]">
-                        <div className="text-gray-500 uppercase text-[7px] tracking-wider">MISSION RISK</div>
-                        <div className="text-amber-400 font-bold text-xs mt-0.5 transition-all">
-                          {loaderProgress < 40 ? "UNKNOWN" : "MEDIUM"}
-                        </div>
-                      </div>
-                      <div className="bg-white/5 p-2 rounded-xl border border-white/[0.04]">
-                        <div className="text-gray-500 uppercase text-[7px] tracking-wider">EST. WORKLOAD</div>
-                        <div className="text-purple-400 font-bold text-xs mt-0.5 transition-all">
-                          {loaderProgress < 60 ? "CALCULATING" : "9 HOURS"}
-                        </div>
-                      </div>
-                      <div className="bg-white/5 p-2 rounded-xl border border-white/[0.04]">
-                        <div className="text-gray-500 uppercase text-[7px] tracking-wider">COMPLEXITY</div>
-                        <div className="text-red-400 font-bold text-xs mt-0.5 transition-all">
-                          {loaderProgress < 80 ? "ANALYZING" : "HIGH"}
-                        </div>
-                      </div>
+                  <div className="flex flex-col h-full items-center justify-center space-y-4 animate-in fade-in duration-300">
+                    <div className="w-10 h-10 border-2 border-t-transparent border-[#8A2BE2] rounded-full animate-spin" />
+                    <div className="text-center">
+                      <h2 className="text-xs font-bold uppercase tracking-wider text-[#06C6B3] flex items-center gap-1.5 justify-center">
+                        <span className="w-1.5 h-1.5 rounded-full bg-[#06C6B3] animate-ping" />
+                        Analyzing Mission Parameters
+                      </h2>
+                      <p className="text-[8px] text-gray-500 uppercase tracking-widest mt-1 font-mono">
+                        Consulting AI estimation core...
+                      </p>
                     </div>
                   </div>
                 ) : (
@@ -4203,7 +4538,7 @@ Your current plan is achievable if no major integration issues occur. Avoid intr
                     </div>
 
                     {/* Chat Messages */}
-                    <div className="flex-1 overflow-y-auto space-y-3 pr-1 min-h-[200px] max-h-[300px] custom-scrollbar text-xs">
+                    <div ref={estChatEndRef} className="flex-1 overflow-y-auto space-y-3 pr-1 min-h-[200px] max-h-[300px] custom-scrollbar text-xs">
                       {estChatHistory.map((msg, idx) => (
                         <div key={idx} className={`group relative p-3 rounded-2xl border transition-all duration-300 ${
                           msg.role === 'user'
@@ -4403,7 +4738,7 @@ Your current plan is achievable if no major integration issues occur. Avoid intr
                         onClick={() => {
                           setSettingsProvider('nvidia');
                           setSettingsApiUrl('https://integrate.api.nvidia.com/v1');
-                          setSettingsModel('meta/llama-3-70b-instruct');
+                          setSettingsModel('meta/llama-3.3-70b-instruct');
                           setSettingsAvailableModels([]);
                         }}
                         className={`py-2 rounded-lg font-bold text-[9px] uppercase tracking-wider border transition-all cursor-pointer ${
@@ -4516,8 +4851,8 @@ Your current plan is achievable if no major integration issues occur. Avoid intr
                       {/* NVIDIA NIM */}
                       <div className="p-2 bg-black/40 border border-white/5 rounded-lg space-y-1">
                         <div className="text-[#0099FF] font-bold uppercase text-[9px]">🟢 NVIDIA NIM</div>
-                        <div className="text-[8px] text-gray-400">• Min Spec: <code className="text-[#c084fc]">meta/llama-3-8b-instruct</code></div>
-                        <div className="text-[8px] text-gray-400">• Nominal: <code className="text-[#66FCF1]">meta/llama-3-70b-instruct</code></div>
+                        <div className="text-[8px] text-gray-400">• Min Spec: <code className="text-[#c084fc]">meta/llama-3.1-8b-instruct</code></div>
+                        <div className="text-[8px] text-gray-400">• Nominal: <code className="text-[#66FCF1]">meta/llama-3.3-70b-instruct</code></div>
                       </div>
 
                       {/* Custom */}
@@ -4544,9 +4879,10 @@ Your current plan is achievable if no major integration issues occur. Avoid intr
                       <button
                         type="button"
                         onClick={handleSyncGoogleCalendar}
-                        className="flex-1 py-2.5 rounded-xl border border-[#06C6B3]/40 text-[#66FCF1] hover:bg-[#06C6B3]/10 transition-all font-mono text-[9px] uppercase tracking-widest cursor-pointer font-bold shadow-[0_0_10px_rgba(6,198,179,0.1)]"
+                        disabled={calendarSyncState !== 'idle'}
+                        className="flex-1 py-2.5 rounded-xl border border-[#06C6B3]/40 text-[#66FCF1] hover:bg-[#06C6B3]/10 transition-all font-mono text-[9px] uppercase tracking-widest cursor-pointer font-bold shadow-[0_0_10px_rgba(6,198,179,0.1)] disabled:opacity-50 disabled:cursor-not-allowed"
                       >
-                        📅 Sync Calendar
+                        {calendarSyncState === 'authorizing' ? '🔑 Authorizing…' : calendarSyncState === 'syncing' ? '📥 Syncing…' : '📅 Sync Calendar'}
                       </button>
                       <button
                         type="button"
@@ -4570,10 +4906,7 @@ Your current plan is achievable if no major integration issues occur. Avoid intr
                     </p>
                     <button
                       type="button"
-                      onClick={() => {
-                        setOpenSettings(false);
-                        router.push('/dashboard/phone-link');
-                      }}
+                      onClick={handleOpenPhoneModal}
                       className="w-full py-2.5 rounded-xl bg-gradient-to-r from-blue-600 to-[#0099FF] hover:opacity-95 text-black font-mono font-bold text-[9px] uppercase tracking-wider transition-all cursor-pointer shadow-[0_0_15px_rgba(0,153,255,0.2)] border border-transparent"
                     >
                       🚀 Open Phone Link Setup Wizard →
@@ -4640,19 +4973,23 @@ Your current plan is achievable if no major integration issues occur. Avoid intr
                       <label className="block text-[10px] font-bold uppercase tracking-widest text-gray-400">
                         Procrastination Severity Level
                       </label>
-                      <span className="text-[10px] font-mono text-[#8A2BE2] font-bold">{procrastinationRating.toFixed(1)}/10.0</span>
+                      <span className="text-[10px] font-mono text-[#8A2BE2] font-bold">
+                        {procrastinationRating !== null ? `${procrastinationRating.toFixed(1)}/10.0` : "Not calibrated"}
+                      </span>
                     </div>
-                    <input
-                      type="range"
-                      min="1.0"
-                      max="10.0"
-                      step="0.1"
-                      value={procrastinationRating}
-                      onChange={e => setProcrastinationRating(parseFloat(e.target.value))}
-                      className="w-full h-1.5 bg-gray-800 rounded-lg appearance-none cursor-pointer accent-[#8A2BE2]"
-                    />
+                    {procrastinationRating !== null && (
+                      <input
+                        type="range"
+                        min="1.0"
+                        max="10.0"
+                        step="0.1"
+                        value={procrastinationRating}
+                        onChange={e => setProcrastinationRating(parseFloat(e.target.value))}
+                        className="w-full h-1.5 bg-gray-800 rounded-lg appearance-none cursor-pointer accent-[#8A2BE2]"
+                      />
+                    )}
                     <p className="text-[7px] text-gray-500 font-mono italic">
-                      Higher values reduce predicted task lead time, raising failure risk alerts.
+                      {procrastinationRating !== null ? "Higher values reduce predicted task lead time, raising failure risk alerts." : "Complete identity scan to calibrate behavioral patterns."}
                     </p>
                   </div>
 
@@ -4663,7 +5000,7 @@ Your current plan is achievable if no major integration issues occur. Avoid intr
                     <input
                       type="text"
                       placeholder="e.g. Focus cycles peak late evening"
-                      value={attentionCycle}
+                      value={attentionCycle ?? ""}
                       onChange={e => setAttentionCycle(e.target.value)}
                       className="w-full rounded-lg px-4 py-2 text-xs focus:ring-1 focus:ring-[#8A2BE2] border border-gray-700 font-mono"
                       style={{ backgroundColor: '#1F2833', color: '#c084fc' }}
@@ -4677,7 +5014,7 @@ Your current plan is achievable if no major integration issues occur. Avoid intr
                     <input
                       type="text"
                       placeholder="e.g. Postpones tasks under high workload pressure"
-                      value={stressResponse}
+                      value={stressResponse ?? ""}
                       onChange={e => setStressResponse(e.target.value)}
                       className="w-full rounded-lg px-4 py-2 text-xs focus:ring-1 focus:ring-[#8A2BE2] border border-gray-700 font-mono"
                       style={{ backgroundColor: '#1F2833', color: '#c084fc' }}
@@ -4782,14 +5119,14 @@ Your current plan is achievable if no major integration issues occur. Avoid intr
               <button
                 type="button"
                 onClick={handleSaveSettings}
-                disabled={settingsConnectionStatus === 'offline' && settingsTab === 'ai'}
+                disabled={(settingsConnectionStatus === 'offline' && settingsTab === 'ai') || isSavingSettings}
                 className={`px-5 py-2 font-bold rounded-lg text-xs uppercase tracking-wider transition-all shadow-[0_0_15px_rgba(138,43,226,0.25)] ${
-                  settingsConnectionStatus === 'offline' && settingsTab === 'ai'
+                  (settingsConnectionStatus === 'offline' && settingsTab === 'ai') || isSavingSettings
                     ? 'bg-gray-850 text-gray-500 cursor-not-allowed border border-gray-800 shadow-none'
                     : 'bg-[#8A2BE2] hover:opacity-90 text-white cursor-pointer'
                 }`}
               >
-                Save Settings
+                {isSavingSettings ? 'Saving…' : 'Save Settings'}
               </button>
             </div>
           </div>
@@ -4848,32 +5185,40 @@ Your current plan is achievable if no major integration issues occur. Avoid intr
                     <div className="space-y-4">
                       {/* Live Procrastination Gauge */}
                       <div className="bg-black/40 border border-white/5 rounded-2xl p-4 space-y-2">
-                        <div className="flex justify-between items-center">
-                          <span className="text-[10px] font-bold uppercase tracking-widest text-gray-400">Procrastination Level</span>
-                          <span className={`text-[10px] font-mono font-bold px-2 py-0.5 rounded border ${
-                            procrastinationRating >= 8.0 ? 'bg-red-950/40 border-red-800 text-red-400' :
-                            procrastinationRating >= 5.0 ? 'bg-amber-950/40 border-amber-800 text-amber-400' :
-                            'bg-green-950/40 border-green-800 text-green-400'
-                          }`}>
-                            {procrastinationRating.toFixed(1)} / 10
-                          </span>
-                        </div>
-                        {/* Progress Bar / Gauge */}
-                        <div className="h-2.5 bg-gray-900 rounded-full overflow-hidden border border-white/5">
-                          <div 
-                            className={`h-full transition-all duration-500 rounded-full ${
-                              procrastinationRating >= 8.0 ? 'bg-gradient-to-r from-red-600 to-red-400' :
-                              procrastinationRating >= 5.0 ? 'bg-gradient-to-r from-amber-500 to-yellow-400' :
-                              'bg-gradient-to-r from-green-500 to-emerald-400'
-                            }`}
-                            style={{ width: `${procrastinationRating * 10}%` }}
-                          />
-                        </div>
-                        <p className="text-[7.5px] text-gray-500 font-mono italic">
-                          {procrastinationRating >= 8.0 ? "CRITICAL DELAY RISK: Chronos expects start lead times of less than 3 hours." :
-                           procrastinationRating >= 5.0 ? "MODERATE DELAY RISK: Chronos expects task start lead times of around 7 hours." :
-                           "STABLE: Highly proactive start behaviors detected. Expected lead times exceed 12 hours."}
-                        </p>
+                        {procrastinationRating !== null ? (
+                          <>
+                            <div className="flex justify-between items-center">
+                              <span className="text-[10px] font-bold uppercase tracking-widest text-gray-400">Procrastination Level</span>
+                              <span className={`text-[10px] font-mono font-bold px-2 py-0.5 rounded border ${
+                                procrastinationRating >= 8.0 ? 'bg-red-950/40 border-red-800 text-red-400' :
+                                procrastinationRating >= 5.0 ? 'bg-amber-950/40 border-amber-800 text-amber-400' :
+                                'bg-green-950/40 border-green-800 text-green-400'
+                              }`}>
+                                {procrastinationRating.toFixed(1)} / 10
+                              </span>
+                            </div>
+                            {/* Progress Bar / Gauge */}
+                            <div className="h-2.5 bg-gray-900 rounded-full overflow-hidden border border-white/5">
+                              <div 
+                                className={`h-full transition-all duration-500 rounded-full ${
+                                  procrastinationRating >= 8.0 ? 'bg-gradient-to-r from-red-600 to-red-400' :
+                                  procrastinationRating >= 5.0 ? 'bg-gradient-to-r from-amber-500 to-yellow-400' :
+                                  'bg-gradient-to-r from-green-500 to-emerald-400'
+                                }`}
+                                style={{ width: `${procrastinationRating * 10}%` }}
+                              />
+                            </div>
+                            <p className="text-[7.5px] text-gray-500 font-mono italic">
+                              {procrastinationRating >= 8.0 ? "CRITICAL DELAY RISK: Chronos expects start lead times of less than 3 hours." :
+                               procrastinationRating >= 5.0 ? "MODERATE DELAY RISK: Chronos expects task start lead times of around 7 hours." :
+                               "STABLE: Highly proactive start behaviors detected. Expected lead times exceed 12 hours."}
+                            </p>
+                          </>
+                        ) : (
+                          <p className="text-[10px] text-gray-500 font-mono italic text-center py-2">
+                            Analysis pending — complete identity scan to calibrate behavioral patterns.
+                          </p>
+                        )}
                       </div>
 
                       {/* Behavioral Cycles & Stress Response */}
@@ -4895,28 +5240,40 @@ Your current plan is achievable if no major integration issues occur. Avoid intr
                           <div className="flex items-center justify-between border-r border-white/5 pr-3">
                             <div>
                               <div className="text-[8px] font-mono text-gray-500 uppercase tracking-widest">Active Streak</div>
+                              {streakCount !== null ? (
                               <div className="text-base font-bold font-mono text-orange-400">{streakCount} 🔥</div>
+                            ) : (
+                              <div className="text-base font-bold font-mono text-gray-600"> — </div>
+                            )}
                             </div>
                             <span className="text-base">⚡</span>
                           </div>
                           <div className="flex items-center justify-between pl-2">
                             <div>
                               <div className="text-[8px] font-mono text-gray-500 uppercase tracking-widest">Recovered Hours</div>
-                              <div className="text-base font-bold font-mono text-cyan-400">{totalRecoveredHours.toFixed(1)}h</div>
+                              <div className="text-base font-bold font-mono text-cyan-400">
+                              {totalRecoveredHours !== null ? `${totalRecoveredHours.toFixed(1)}h` : " — "}
+                            </div>
                             </div>
                             <span className="text-base">⌛</span>
                           </div>
                           <div className="flex items-center justify-between border-r border-white/5 pr-3 pt-1.5 border-t border-white/5">
                             <div>
                               <div className="text-[8px] font-mono text-gray-500 uppercase tracking-widest">Secured Deadlines</div>
+                              {executionCount !== null ? (
                               <div className="text-base font-bold font-mono text-green-400">{executionCount}</div>
+                            ) : (
+                              <div className="text-base font-bold font-mono text-gray-600"> — </div>
+                            )}
                             </div>
                             <span className="text-base">✅</span>
                           </div>
                           <div className="flex items-center justify-between pl-2 pt-1.5 border-t border-white/5">
                             <div>
                               <div className="text-[8px] font-mono text-gray-500 uppercase tracking-widest">Nexus Events</div>
-                              <div className="text-base font-bold font-mono text-red-500">{failureCount}</div>
+                              <div className="text-base font-bold font-mono text-red-500">
+                              {failureCount !== null ? failureCount : " — "}
+                            </div>
                             </div>
                             <span className="text-base">☄️</span>
                           </div>
@@ -5005,7 +5362,7 @@ Your current plan is achievable if no major integration issues occur. Avoid intr
                 </div>
 
                 {/* Question Area & Conversation Log */}
-                <div className="flex-1 overflow-y-auto pr-2 custom-scrollbar space-y-4 mb-4 min-h-[160px] relative z-10">
+                <div ref={trainingChatEndRef} className="flex-1 overflow-y-auto pr-2 custom-scrollbar space-y-4 mb-4 min-h-[160px] relative z-10">
                   {trainingHistory.length === 0 && trainingLoading ? (
                     <div className="flex flex-col items-center justify-center py-12 text-center space-y-4">
                       <div className="w-8 h-8 border-2 border-t-transparent border-[#8A2BE2] rounded-full animate-spin" />
@@ -5136,6 +5493,106 @@ Your current plan is achievable if no major integration issues occur. Avoid intr
             >
               Acknowledge Collapse & Log Nexus Event ☄️
             </button>
+          </div>
+        </div>
+      )}
+
+      {/* Phone Link Setup Modal */}
+      {showPhoneModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/85 backdrop-blur-md p-4 animate-in fade-in duration-300">
+          <div className="bg-[#0B0C10]/95 border border-[#0099FF]/30 text-gray-100 shadow-[0_0_35px_rgba(0,153,255,0.25)] rounded-3xl w-full max-w-md p-6 relative flex flex-col space-y-5 relative overflow-hidden">
+            
+            {/* Close button */}
+            <button
+              onClick={() => setShowPhoneModal(false)}
+              className="absolute top-4 right-4 text-gray-400 hover:text-white transition-colors focus:outline-none text-base font-bold font-mono"
+            >
+              ✕
+            </button>
+
+            <div className="text-center space-y-1.5 pt-2">
+              <span className="text-3xl block select-none">📱</span>
+              <h2 className="text-base font-black uppercase tracking-widest text-[#0099FF] font-mono">
+                Mobile Phone Link
+              </h2>
+              <p className="text-[8px] font-mono text-gray-500 uppercase tracking-widest">
+                Establish Out-of-Band Warning Channel
+              </p>
+            </div>
+
+            <div className="space-y-4">
+              <div className="space-y-1.5 text-left">
+                <label className="block text-[8px] font-mono font-bold uppercase tracking-widest text-gray-400">
+                  1. ntfy Subscription Topic
+                </label>
+                <input
+                  type="text"
+                  value={ntfyTopic}
+                  readOnly
+                  placeholder="Generating topic..."
+                  className="w-full rounded-lg px-4 py-2.5 text-xs bg-[#1F2833]/20 border border-gray-800 text-gray-400 focus:outline-none transition-all font-mono select-all cursor-not-allowed"
+                />
+                <p className="text-[7px] text-gray-500 leading-normal">
+                  This unique subscription topic is randomly generated to secure your Out-of-Band warnings channel.
+                </p>
+              </div>
+
+              {/* Connection instructions card */}
+              <div className="p-3.5 bg-white/5 border border-white/10 rounded-2xl space-y-2 text-left">
+                <span className="text-[#0099FF] font-mono text-[8px] font-bold uppercase tracking-wider block">
+                  2. Install App & Subscribe
+                </span>
+                <ol className="list-decimal list-inside text-[8px] font-mono text-gray-400 space-y-1 pl-0.5 leading-relaxed">
+                  <li>Download <span className="text-white font-bold">ntfy</span> app from Google Play or App Store.</li>
+                  <li>Tap <span className="text-white font-bold">"Subscribe to topic"</span> inside the app.</li>
+                  <li>Enter the exact topic name: <code className="text-[#c084fc] font-bold bg-[#1F2833] px-1 rounded">{ntfyTopic || '(empty)'}</code></li>
+                  <li>Make sure notifications are enabled for ntfy.</li>
+                </ol>
+              </div>
+
+              {/* Verification Status */}
+              <div className="p-3.5 bg-black/40 border border-white/5 rounded-2xl text-left space-y-1.5">
+                <span className="text-[8px] font-mono text-gray-500 uppercase tracking-widest block">
+                  3. Verification Status
+                </span>
+                <div className="flex justify-between items-center">
+                  <span className="text-[8px] font-mono text-gray-400">Status:</span>
+                  {phoneTestSuccess === true ? (
+                    <span className="px-2 py-0.5 rounded bg-green-950/40 border border-green-800/40 text-green-400 text-[8px] font-mono font-bold uppercase">
+                      Verified Sync Online
+                    </span>
+                  ) : phoneTestSuccess === false ? (
+                    <span className="px-2 py-0.5 rounded bg-red-950/40 border border-red-800/40 text-red-400 text-[8px] font-mono font-bold uppercase">
+                      Verification Failed
+                    </span>
+                  ) : (
+                    <span className="px-2 py-0.5 rounded bg-gray-900 border border-gray-800 text-gray-500 text-[8px] font-mono uppercase">
+                      Awaiting Diagnostic Test
+                    </span>
+                  )}
+                </div>
+              </div>
+
+              {/* Action buttons */}
+              <div className="flex gap-3 pt-2">
+                <button
+                  type="button"
+                  onClick={handleSavePhoneTopic}
+                  disabled={phoneLoading}
+                  className="flex-1 py-2.5 rounded-xl bg-white/5 border border-white/10 hover:bg-white/10 text-gray-300 font-mono text-[8px] uppercase tracking-wider transition-all cursor-pointer text-center font-bold"
+                >
+                  Save Config
+                </button>
+                <button
+                  type="button"
+                  onClick={handleTestPhoneTopic}
+                  disabled={phoneLoading}
+                  className="flex-1 py-2.5 rounded-xl bg-[#0099FF] text-black font-mono text-[8px] uppercase tracking-wider transition-all cursor-pointer text-center font-black border border-transparent shadow-[0_0_15px_rgba(0,153,255,0.2)] hover:opacity-90"
+                >
+                  {phoneLoading ? "Transmitting..." : "⚡ Test Link"}
+                </button>
+              </div>
+            </div>
           </div>
         </div>
       )}

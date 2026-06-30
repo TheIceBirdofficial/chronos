@@ -1,7 +1,8 @@
 import { API_BASE } from "@/config";
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useState, useRef } from 'react';
 import RecoveryChecklist from '@/components/RecoveryChecklist';
 import RecoveryCompletionBanner from '@/components/RecoveryCompletionBanner';
+import RecoveryBriefing, { RecoveryBriefing as RecoveryBriefingType } from '@/components/RecoveryBriefing';
 
 interface StatusResponse {
   severity: string;
@@ -12,6 +13,7 @@ interface StatusResponse {
   riskAfter: number;
   progress: number;
   checklist: string[];
+  recoveryBriefing?: RecoveryBriefingType;
 }
 
 interface CompletionStats {
@@ -21,7 +23,9 @@ interface CompletionStats {
 }
 
 export default function RecoveryCommandCenter({ taskId }: { taskId: string }) {
+  const [briefing, setBriefing] = useState<RecoveryBriefingType | null>(null);
   const [status, setStatus] = useState<StatusResponse | null>(null);
+  const [statusError, setStatusError] = useState<string | null>(null);
   const [completed, setCompleted] = useState(false);
   const [completionStats, setCompletionStats] = useState<CompletionStats | null>(null);
   const [negotiation, setNegotiation] = useState('');
@@ -29,6 +33,11 @@ export default function RecoveryCommandCenter({ taskId }: { taskId: string }) {
   const [chatHistory, setChatHistory] = useState<Array<{ role: 'user' | 'assistant'; content: string }>>([]);
   const [chatLoading, setChatLoading] = useState(false);
   const [showCancelConfirm, setShowCancelConfirm] = useState(false);
+  const chatEndRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    chatEndRef.current?.scrollTo({ top: chatEndRef.current.scrollHeight, behavior: 'smooth' });
+  }, [chatHistory, chatLoading]);
   const [durationMinutes, setDurationMinutes] = useState(1);
   const [targetTime, setTargetTime] = useState<string>('');
 
@@ -67,10 +76,24 @@ export default function RecoveryCommandCenter({ taskId }: { taskId: string }) {
       localStorage.setItem(startTimeKey, Date.now().toString());
     }
     // Load status
+    setStatus(null);
+    setStatusError(null);
     fetch(`${API_BASE}/api/recovery/status?taskId=${taskId}`)
-      .then(res => res.json())
+      .then(async res => {
+        const data = await res.json();
+        if (!res.ok || data.error) {
+          throw new Error(data.error || 'Recovery data unavailable');
+        }
+        if (!Array.isArray(data.checklist) || data.checklist.length === 0) {
+          throw new Error('Recovery checklist is unavailable');
+        }
+        return data;
+      })
       .then(data => {
         setStatus(data);
+        if (data.recoveryBriefing) {
+          setBriefing(data.recoveryBriefing);
+        }
         // Initialize chat history from localStorage or default
         const chatKey = `chronos-recovery-chat-${taskId}`;
         const savedChat = localStorage.getItem(chatKey);
@@ -84,7 +107,10 @@ export default function RecoveryCommandCenter({ taskId }: { taskId: string }) {
           initializeDefaultChat(data.checklist);
         }
       })
-      .catch(err => console.warn('Failed to load recovery status', err));
+      .catch(err => {
+        console.warn('Failed to load recovery status', err);
+        setStatusError(err instanceof Error ? err.message : 'Failed to load recovery status');
+      });
   }, [taskId]);
 
   const initializeDefaultChat = (checklist: string[]) => {
@@ -228,6 +254,19 @@ Always format your responses with the modified checklist inside a JSON-like arra
     }
   };
 
+  if (statusError) {
+    return (
+      <div className="flex flex-col items-center justify-center p-8 bg-[#0B0C10]/60 border border-red-500/30 rounded-3xl backdrop-blur-sm h-[400px] text-center">
+        <span className="text-xs text-red-300 uppercase tracking-widest font-bold">
+          Recovery data unavailable
+        </span>
+        <p className="text-[10px] text-gray-500 mt-3 max-w-xs">
+          {statusError}
+        </p>
+      </div>
+    );
+  }
+
   if (!status) {
     return (
       <div className="flex flex-col items-center justify-center p-8 bg-[#0B0C10]/60 border border-gray-800 rounded-3xl backdrop-blur-sm h-[400px]">
@@ -244,9 +283,9 @@ Always format your responses with the modified checklist inside a JSON-like arra
       <RecoveryCompletionBanner
         riskBefore={status.riskBefore}
         riskAfter={status.riskAfter}
-        recoveredHours={completionStats?.recoveredHours || status.temporalDebtHours}
-        streakCount={completionStats?.streakCount || 1}
-        confidenceBoost={completionStats?.confidenceBoost || 50}
+        recoveredHours={completionStats?.recoveredHours ?? status.temporalDebtHours}
+        streakCount={completionStats?.streakCount}
+        confidenceBoost={completionStats?.confidenceBoost}
         durationMinutes={durationMinutes}
         onDismiss={() => {
           setCompleted(false);
@@ -282,6 +321,12 @@ Always format your responses with the modified checklist inside a JSON-like arra
           Cancel
         </button>
       </div>
+
+      {briefing && (
+        <div className="flex-shrink-0 animate-in fade-in duration-500">
+          <RecoveryBriefing briefing={briefing} />
+        </div>
+      )}
 
       {/* Progress Bar */}
       <div className="space-y-1.5 flex-shrink-0">
@@ -362,7 +407,7 @@ Always format your responses with the modified checklist inside a JSON-like arra
           </span>
         </div>
         
-        <div className="flex-1 overflow-y-auto space-y-2 pr-1 custom-scrollbar text-[10px] mb-2 font-mono">
+        <div ref={chatEndRef} className="flex-1 overflow-y-auto space-y-2 pr-1 custom-scrollbar text-[10px] mb-2 font-mono">
           {chatHistory.map((msg, idx) => (
             <div key={idx} className={`p-2 rounded-xl max-w-[90%] leading-relaxed ${
               msg.role === 'user'

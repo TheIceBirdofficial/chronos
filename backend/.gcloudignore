@@ -1,0 +1,48 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Database and data files (keep settings.json for backend config)
+*.db
+interventions.json
+db.json
+
+# Secrets
+secrets.json
+
+# Git
+.git/
+.gitignore
+
+# Docker files are needed for build - do NOT exclude
+# Dockerfile
+# .dockerignore
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Node (just in case)
+node_modules/
+npm-debug.log
+yarn-error.log

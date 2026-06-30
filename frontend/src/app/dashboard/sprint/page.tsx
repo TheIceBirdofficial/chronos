@@ -40,10 +40,28 @@ const renderFormattedText = (text: string) => {
       return <h2 key={i} className="text-lg font-black text-[#66FCF1] mt-6 mb-3 uppercase tracking-widest">{cleaned.replace(/^#\s*/, '')}</h2>;
     }
     
-    // Format bullet points
+    // Single-asterisk lines → field labels (not bullets)
+    if (cleaned.startsWith('*') && !cleaned.startsWith('**') && cleaned.length > 1) {
+      cleaned = cleaned.replace(/^\*\s*/, '');
+      const parts = cleaned.split('**');
+      const contentElements = parts.map((part, idx) => {
+        if (idx % 2 === 1) {
+          return <strong key={idx} className="font-extrabold text-[#66FCF1]">{part}</strong>;
+        }
+        return part;
+      });
+      return (
+        <div key={i} className="text-[11px] font-bold text-purple-300 uppercase tracking-wider mt-3 mb-0.5">
+          {contentElements}
+        </div>
+      );
+    }
+    
+    // Dash bullets and literal bullet characters
     let isBullet = false;
-    if (cleaned.startsWith('-') || cleaned.startsWith('*')) {
-      cleaned = cleaned.replace(/^[-\*]\s*/, '');
+    const bulletChar = cleaned.match(/^[•\-]\s*/)?.[0] || '';
+    if (bulletChar) {
+      cleaned = cleaned.replace(/^[•\-]\s*/, '');
       isBullet = true;
     }
     
@@ -57,6 +75,9 @@ const renderFormattedText = (text: string) => {
     });
     
     if (isBullet) {
+      if (!cleaned) {
+        return <div key={i} className="h-1.5" />;
+      }
       return (
         <div key={i} className="flex items-start gap-2 ml-4 my-1 font-sans text-xs text-gray-300">
           <span className="text-purple-400 mt-1">•</span>
@@ -108,6 +129,11 @@ function SprintPageContent() {
     return () => window.removeEventListener('mousemove', handleMove);
   }, []);
 
+  // Extract searchParams values to avoid re-fetch on every render
+  const titleParam = searchParams.get('title');
+  const detailParam = searchParams.get('detail');
+  const durParam = searchParams.get('duration');
+
   // Load Task details
   useEffect(() => {
     // Route Guard: Prevent skipping onboarding
@@ -143,10 +169,6 @@ function SprintPageContent() {
         let durationMinutes = found.estimatedHours * 60;
 
         if (checkpointId) {
-          const titleParam = searchParams.get('title');
-          const detailParam = searchParams.get('detail');
-          const durParam = searchParams.get('duration');
-          
           if (durParam) {
             durationMinutes = parseInt(durParam);
           } else {
@@ -167,7 +189,7 @@ function SprintPageContent() {
     };
 
     fetchTask();
-  }, [taskId, checkpointId, searchParams]);
+  }, [taskId, checkpointId, titleParam, detailParam, durParam]);
 
   // Timer logic
   useEffect(() => {
@@ -188,16 +210,49 @@ function SprintPageContent() {
     };
   }, [sprintActive, sprintPaused]);
 
+  const syncSprintStatus = async (activeOverride?: boolean, pausedOverride?: boolean, secondsLeftOverride?: number) => {
+    try {
+      const activeVal = activeOverride !== undefined ? activeOverride : sprintActive;
+      const pausedVal = pausedOverride !== undefined ? pausedOverride : sprintPaused;
+      const secondsLeftVal = secondsLeftOverride !== undefined ? secondsLeftOverride : secondsLeft;
+      await fetch(`${API_BASE}/api/sprint/status`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          taskId,
+          checkpointId: checkpointId || undefined,
+          active: activeVal,
+          paused: pausedVal,
+          duration: initialSeconds,
+          secondsLeft: secondsLeftVal
+        })
+      });
+    } catch (e) {
+      console.warn("Failed to sync sprint status to backend:", e);
+    }
+  };
+
+  // Periodic status sync while active
+  useEffect(() => {
+    if (!sprintActive) return;
+    const interval = setInterval(() => {
+      syncSprintStatus();
+    }, 5000);
+    return () => clearInterval(interval);
+  }, [sprintActive, sprintPaused, secondsLeft, initialSeconds]);
+
   const handleStartSprint = () => {
     setSprintActive(true);
     setSprintPaused(false);
     toast.success("Executive Focus Sprint commenced. Chronos time locks activated.");
+    syncSprintStatus(true, false);
   };
 
   const handleFinishSprint = async () => {
     if (!task) return;
     setIsFinishing(true);
     setSprintActive(false);
+    syncSprintStatus(false, false);
 
     const elapsedSeconds = initialSeconds - secondsLeft;
     const actualHours = Math.max(0.01, elapsedSeconds / 3600.0);
@@ -405,12 +460,16 @@ function SprintPageContent() {
                     <div className="grid grid-cols-2 gap-2">
                       <button
                         onClick={() => {
-                          setSprintPaused(prev => !prev);
-                          if (!sprintPaused) {
-                            toast.info("Focus session paused.");
-                          } else {
-                            toast.success("Focus session resumed.");
-                          }
+                          setSprintPaused(prev => {
+                            const newVal = !prev;
+                            if (newVal) {
+                              toast.info("Focus session paused.");
+                            } else {
+                              toast.success("Focus session resumed.");
+                            }
+                            syncSprintStatus(sprintActive, newVal);
+                            return newVal;
+                          });
                         }}
                         className={`py-3 rounded-2xl font-bold text-[10px] font-mono uppercase tracking-wider border cursor-pointer transition-all text-center ${
                           sprintPaused
@@ -426,6 +485,7 @@ function SprintPageContent() {
                           setSprintPaused(false);
                           setSecondsLeft(initialSeconds);
                           toast.error("Focus session aborted. Timer reset.");
+                          syncSprintStatus(false, false, initialSeconds);
                         }}
                         className="py-3 rounded-2xl font-bold text-[10px] font-mono uppercase tracking-wider border border-red-500/30 text-red-400 bg-red-950/20 hover:bg-red-900/30 cursor-pointer transition-all text-center"
                       >

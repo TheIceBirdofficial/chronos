@@ -3,7 +3,8 @@
 import { useState, useEffect, useRef } from 'react';
 import { useRouter } from 'next/navigation';
 import ChronosCanvas from '@/components/ChronosCanvas';
-import { API_BASE } from "@/config";
+import { API_BASE, isPlaceholderTwin, isRealUsername } from "@/config";
+import SettingsGear from '@/components/SettingsGear';
 import { toast } from "sonner";
 import { Toaster } from "@/components/ui/sonner";
 
@@ -752,10 +753,28 @@ const renderFormattedText = (text: string) => {
       return <h2 key={i} className="text-lg font-black text-[#66FCF1] mt-6 mb-3 uppercase tracking-widest">{cleaned.replace(/^#\s*/, '')}</h2>;
     }
     
-    // Format bullet points
+    // Single-asterisk lines → field labels (not bullets)
+    if (cleaned.startsWith('*') && !cleaned.startsWith('**') && cleaned.length > 1) {
+      cleaned = cleaned.replace(/^\*\s*/, '');
+      const parts = cleaned.split('**');
+      const contentElements = parts.map((part, idx) => {
+        if (idx % 2 === 1) {
+          return <strong key={idx} className="font-extrabold text-[#66FCF1]">{part}</strong>;
+        }
+        return part;
+      });
+      return (
+        <div key={i} className="text-[11px] font-bold text-purple-300 uppercase tracking-wider mt-3 mb-0.5">
+          {contentElements}
+        </div>
+      );
+    }
+    
+    // Dash bullets and literal bullet characters
     let isBullet = false;
-    if (cleaned.startsWith('-') || cleaned.startsWith('*')) {
-      cleaned = cleaned.replace(/^[-\*]\s*/, '');
+    const bulletChar = cleaned.match(/^[•\-]\s*/)?.[0] || '';
+    if (bulletChar) {
+      cleaned = cleaned.replace(/^[•\-]\s*/, '');
       isBullet = true;
     }
     
@@ -769,6 +788,9 @@ const renderFormattedText = (text: string) => {
     });
     
     if (isBullet) {
+      if (!cleaned) {
+        return <div key={i} className="h-1.5" />;
+      }
       return (
         <div key={i} className="flex items-start gap-2 ml-4 my-1 font-sans text-xs text-gray-300">
           <span className="text-purple-400 mt-1">•</span>
@@ -802,9 +824,7 @@ export default function Home() {
     window.scrollTo({ top: 0, behavior: 'instant' });
   }, []);
 
-  useEffect(() => {
-    window.scrollTo({ top: 0, behavior: 'instant' });
-  }, [step]);
+  // Step change scroll removed — was causing on-submit scroll-to-top
 
   // Escape key event listener to exit warp logo mode
   useEffect(() => {
@@ -822,7 +842,7 @@ export default function Home() {
     setIsTransitioning(true);
     setTimeout(() => {
       router.push(path);
-    }, 450);
+    }, 150);
   };
 
   // Developer mode bypass toggle
@@ -860,9 +880,12 @@ export default function Home() {
   const [showDownloadPrompt, setShowDownloadPrompt] = useState(false);
   const [devOverrideState, setDevOverrideState] = useState<'idle' | 'listening' | 'thinking' | 'speaking' | 'offline' | null>(null);
   const [settingsTab, setSettingsTab] = useState<'ai' | 'phone' | 'twin' | 'dev'>('ai');
+  const [phonePanelOpen, setPhonePanelOpen] = useState(false);
   const [sleepStart, setSleepStart] = useState<number>(23);
   const [sleepEnd, setSleepEnd] = useState<number>(7);
   const [scanError, setScanError] = useState<string | null>(null);
+  const [calendarSyncState, setCalendarSyncState] = useState<'idle' | 'authorizing' | 'fetching' | 'completed' | 'failed'>('idle');
+  const [isSavingSettings, setIsSavingSettings] = useState(false);
   const [ntfyTopic, setNtfyTopic] = useState<string>(() => {
     // Generate a random topic by default to be secure
     const chars = 'abcdefghijklmnopqrstuvwxyz0123456789';
@@ -873,6 +896,7 @@ export default function Home() {
     return `chronos_alerts_${rand}`;
   });
   const devOverrideStateRef = useRef(devOverrideState);
+  const verificationInFlightRef = useRef(false);
   
   useEffect(() => {
     devOverrideStateRef.current = devOverrideState;
@@ -921,18 +945,27 @@ export default function Home() {
 
   // Load saved config and username on mount
   useEffect(() => {
-    // Fetch backend settings (username, sleep hours)
+    let cancelled = false;
     fetch(`${API_BASE}/api/settings`)
       .then(res => {
         if (!res.ok) throw new Error();
         return res.json();
       })
       .then(data => {
-        if (data.username) {
+        if (cancelled) return;
+        if (data.onboarding_completed) {
+          setHasMemory(true);
+          router.push('/dashboard');
+          return;
+        }
+        const localName = localStorage.getItem('chronos-username');
+        if (localName && (!data.username || data.username === 'user')) {
+          setUsername(localName);
+        } else if (data.username) {
           setUsername(data.username);
           localStorage.setItem('chronos-username', data.username);
         }
-        if (data.twinProfile) {
+        if (data.twinProfile && !isPlaceholderTwin(data.twinProfile)) {
           localStorage.setItem('chronos-performance-twin', data.twinProfile);
           setHasMemory(true);
         }
@@ -959,6 +992,7 @@ export default function Home() {
         }
       })
       .catch(err => {
+        if (cancelled) return;
         console.warn("Failed to fetch settings from backend", err);
         const savedName = localStorage.getItem('chronos-username');
         if (savedName) {
@@ -968,7 +1002,7 @@ export default function Home() {
 
     const savedName = localStorage.getItem('chronos-username');
     const savedTwin = localStorage.getItem('chronos-performance-twin');
-    if (savedName && savedTwin) {
+    if (isRealUsername(savedName) && savedTwin && !isPlaceholderTwin(savedTwin)) {
       setHasMemory(true);
     }
 
@@ -983,6 +1017,8 @@ export default function Home() {
         console.error("Failed to parse saved config", e);
       }
     }
+
+    return () => { cancelled = true; };
   }, []);
 
 
@@ -1244,49 +1280,59 @@ export default function Home() {
   };
 
   const handleStartInitialization = () => {
-    const scrollY = window.scrollY;
     setStep('settings');
     setShowQuestions(true);
-    requestAnimationFrame(() => window.scrollTo(0, scrollY));
   };
 
   const handleSaveSettings = async (e: React.FormEvent) => {
     e.preventDefault();
+    setIsSavingSettings(true);
     let finalNtfyTopic = ntfyTopic;
     if (finalNtfyTopic.startsWith('chronos-alerts-') || !finalNtfyTopic.trim()) {
       finalNtfyTopic = generateRandomNtfyTopic();
       setNtfyTopic(finalNtfyTopic);
     }
     localStorage.setItem('chronos-ai-config', JSON.stringify(aiConfig));
-    localStorage.setItem('chronos-username', username);
     localStorage.setItem('chronos-ntfy-topic', finalNtfyTopic);
+    localStorage.setItem('chronos-sleep-start', String(sleepStart));
+    localStorage.setItem('chronos-sleep-end', String(sleepEnd));
+    if (isRealUsername(username)) {
+      localStorage.setItem('chronos-username', username);
+    }
     
     try {
+      const settingsPayload: Record<string, unknown> = {
+        sleepStart: Number(sleepStart),
+        sleepEnd: Number(sleepEnd),
+        ntfyTopic: finalNtfyTopic,
+        aiProvider: aiConfig.provider,
+        aiApiUrl: aiConfig.apiUrl,
+        aiApiKey: aiConfig.apiKey,
+        aiModel: aiConfig.model,
+      };
+      if (isRealUsername(username)) {
+        settingsPayload.username = username;
+      }
+      const existingTwin = localStorage.getItem('chronos-performance-twin');
+      if (existingTwin && !isPlaceholderTwin(existingTwin)) {
+        settingsPayload.twinProfile = existingTwin;
+      }
       await fetch(`${API_BASE}/api/settings`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          username,
-          sleepStart: Number(sleepStart),
-          sleepEnd: Number(sleepEnd),
-          ntfyTopic: finalNtfyTopic,
-          twinProfile: localStorage.getItem('chronos-performance-twin') || ""
-        })
+        body: JSON.stringify(settingsPayload)
       });
     } catch (err) {
       console.warn("Failed to sync settings during onboarding setup", err);
+    } finally {
+      setIsSavingSettings(false);
     }
     
-    // Lock scroll position so the page doesn't jump back to the hero on step change
-    const scrollY = window.scrollY;
     setStep('about');
-    requestAnimationFrame(() => window.scrollTo(0, scrollY));
   };
 
   const handleStartScan = () => {
-    const scrollY = window.scrollY;
     setStep('questions');
-    requestAnimationFrame(() => window.scrollTo(0, scrollY));
     startIdentityScan();
   };
 
@@ -1358,14 +1404,13 @@ export default function Home() {
 
     setProfileSummary(summary);
     localStorage.setItem('chronos-performance-twin', summary);
-    localStorage.setItem('chronos-procrastination-rating', '6.0');
-    localStorage.setItem('chronos-attention-cycle', "Focus cycles peak late evening");
-    localStorage.setItem('chronos-stress-response', "Postpones tasks under high workload pressure");
+    localStorage.setItem('chronos-procrastination-rating', '');
+    localStorage.setItem('chronos-attention-cycle', '');
+    localStorage.setItem('chronos-stress-response', '');
     
     setHasMemory(true);
     setStep('intro');
     setShowQuestions(false);
-    window.scrollTo({ top: 0, behavior: 'smooth' });
 
     try {
       await fetch(`${API_BASE}/api/settings`, {
@@ -1377,9 +1422,7 @@ export default function Home() {
           sleepEnd: finalSleepEnd,
           ntfyTopic: finalNtfyTopic,
           twinProfile: summary,
-          procrastinationRating: 6.0,
-          attentionCycle: "Focus cycles peak late evening",
-          stressResponse: "Postpones tasks under high workload pressure"
+          onboardingComplete: true
         })
       });
     } catch (err) {
@@ -1388,24 +1431,8 @@ export default function Home() {
   };
 
   const handleSpawnLocalDaemon = async () => {
-    const toastId = toast.loading("Launching local Voice Daemon subprocess...");
-    try {
-      const res = await fetch(`${API_BASE}/api/voice/start-local-daemon`, {
-        method: 'POST'
-      });
-      if (res.ok) {
-        toast.dismiss(toastId);
-        toast.success("Voice Daemon command spawned! Connecting...");
-      } else {
-        toast.dismiss(toastId);
-        toast.error("Failed to spawn local Voice Daemon. Make sure you run it manually.");
-        setShowDownloadPrompt(true);
-      }
-    } catch (e) {
-      toast.dismiss(toastId);
-      toast.error("Failed to spawn local Voice Daemon. Make sure you run it manually.");
-      setShowDownloadPrompt(true);
-    }
+    toast.info("Download the daemon and run it manually. Alt+C for voice anywhere.");
+    setShowDownloadPrompt(true);
   };
 
   const handleChangeGoogleAccount = async () => {
@@ -1428,34 +1455,14 @@ export default function Home() {
     }
   };
 
-  const handleSyncGoogleCalendarDirect = async () => {
-    const toastId = toast.loading("Syncing Google Calendar events...");
-    try {
-      const res = await fetch(`${API_BASE}/api/calendar/sync`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ frontend_origin: window.location.origin })
-      });
-      if (res.ok) {
-        const data = await res.json();
-        toast.dismiss(toastId);
-        if (data.count > 0) {
-          toast.success(`Synced Google Calendar: Imported ${data.count} Locked Exams.`);
-        } else {
-          toast.info("Google Calendar is up to date.");
-        }
-      } else {
-        toast.dismiss(toastId);
-        toast.error("Google Calendar sync failed.");
-      }
-    } catch (err) {
-      toast.dismiss(toastId);
-      toast.error("Google Calendar sync failed.");
-    }
-  };
-
   const handleSyncGoogleCalendar = async () => {
-    const toastId = toast.loading("Syncing Google Calendar events...");
+    if (calendarSyncState === 'authorizing' || calendarSyncState === 'fetching') return;
+    setCalendarSyncState('authorizing');
+
+    const timeout = setTimeout(() => {
+      setCalendarSyncState('failed');
+    }, 15000);
+
     try {
       const res = await fetch(`${API_BASE}/api/calendar/sync`, {
         method: 'POST',
@@ -1465,45 +1472,84 @@ export default function Home() {
       if (res.ok) {
         const data = await res.json();
         if (data.status === 'auth_required') {
-          toast.dismiss(toastId);
-          const popup = window.open(data.url, 'ChronosGoogleAuth', 'width=600,height=700');
-          
+          clearTimeout(timeout);
+          setCalendarSyncState('authorizing');
+          window.open(data.url, 'ChronosGoogleAuth', 'width=600,height=700');
+
+          const authTimeout = setTimeout(() => {
+            setCalendarSyncState('failed');
+          }, 15000);
+
           const handleAuthMessage = async (e: MessageEvent) => {
             if (e.data && e.data.type === 'CHRONOS_GCAL_AUTH_SUCCESS') {
               window.removeEventListener('message', handleAuthMessage);
-              toast.success("Google Calendar authenticated! Fetching events...");
-              await handleSyncGoogleCalendarDirect();
+              clearTimeout(authTimeout);
+              setCalendarSyncState('fetching');
+              const authTimeout2 = setTimeout(() => {
+                setCalendarSyncState('failed');
+              }, 15000);
+              try {
+                const syncRes = await fetch(`${API_BASE}/api/calendar/sync`, {
+                  method: 'POST',
+                  headers: { 'Content-Type': 'application/json' },
+                  body: JSON.stringify({ frontend_origin: window.location.origin })
+                });
+                clearTimeout(authTimeout2);
+                if (syncRes.ok) {
+                  const syncData = await syncRes.json();
+                  setCalendarSyncState('completed');
+                  localStorage.setItem('chronos-calendar-connected', 'true');
+                  setTimeout(() => setCalendarSyncState('idle'), 3000);
+                  if (syncData.count > 0) {
+                    toast.success(`Synced: Imported ${syncData.count} locked ${syncData.count === 1 ? 'task' : 'tasks'}.`);
+                  } else {
+                    toast.info("Google Calendar is up to date.");
+                  }
+                } else {
+                  setCalendarSyncState('failed');
+                }
+              } catch {
+                clearTimeout(authTimeout2);
+                setCalendarSyncState('failed');
+              }
             }
           };
           window.addEventListener('message', handleAuthMessage);
         } else {
-          toast.dismiss(toastId);
+          clearTimeout(timeout);
+          setCalendarSyncState('completed');
+          localStorage.setItem('chronos-calendar-connected', 'true');
+          setTimeout(() => setCalendarSyncState('idle'), 3000);
           if (data.count > 0) {
-            toast.success(`Synced Google Calendar: Imported ${data.count} Locked Exams.`);
+            toast.success(`Synced: Imported ${data.count} locked ${data.count === 1 ? 'task' : 'tasks'}.`);
           } else {
             toast.info("Google Calendar is up to date.");
           }
         }
       } else {
-        toast.dismiss(toastId);
-        toast.error("Google Calendar sync failed.");
+        clearTimeout(timeout);
+        setCalendarSyncState('failed');
       }
     } catch (err) {
-      toast.dismiss(toastId);
-      toast.error("Google Calendar sync failed.");
+      clearTimeout(timeout);
+      setCalendarSyncState('failed');
     }
   };
 
   // Dynamic Model Fetching & Connectivity Validation Hook
   useEffect(() => {
     if (step !== 'settings' && !openHomeSettings) return;
+    if (verificationInFlightRef.current) return;
 
     let active = true;
     const fetchModelsAndValidate = async () => {
+      if (verificationInFlightRef.current) return;
+      verificationInFlightRef.current = true;
       // Avoid querying with incomplete/empty API keys during typing
       if (aiConfig.provider !== 'custom' && (!aiConfig.apiKey || aiConfig.apiKey.trim().length <= 5)) {
         setConnectionStatus('offline');
         setConnectionError('API Key is incomplete.');
+        verificationInFlightRef.current = false;
         return;
       }
 
@@ -1512,12 +1558,19 @@ export default function Home() {
       setConnectionError('');
       setAvailableModels([]);
       try {
-        const queryParams = new URLSearchParams({
-          provider: aiConfig.provider,
-          apiUrl: aiConfig.apiUrl,
-          apiKey: aiConfig.apiKey || '',
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), 8000);
+        const res = await fetch(`${API_BASE}/api/ai/models`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            provider: aiConfig.provider,
+            apiUrl: aiConfig.apiUrl,
+            apiKey: aiConfig.apiKey || '',
+          }),
+          signal: controller.signal,
         });
-        const res = await fetch(`${API_BASE}/api/ai/models?${queryParams.toString()}`);
+        clearTimeout(timeoutId);
         if (!res.ok) throw new Error("Verification request failed");
         const data = await res.json();
         
@@ -1554,17 +1607,18 @@ export default function Home() {
         }
       } finally {
         if (active) setLoadingModels(false);
+        verificationInFlightRef.current = false;
       }
     };
 
-    // Debounce the connection checks slightly to handle fast typing overrides
     const delayDebounce = setTimeout(fetchModelsAndValidate, 1500);
 
     return () => {
       active = false;
       clearTimeout(delayDebounce);
+      setLoadingModels(false);
     };
-  }, [aiConfig.provider, aiConfig.apiUrl, aiConfig.apiKey, step, openHomeSettings, recheckTrigger]);
+  }, [aiConfig.provider, step, openHomeSettings, recheckTrigger]);
 
   const reset = () => {
     localStorage.clear();
@@ -1811,15 +1865,19 @@ Start the final response with "IDENTITY SCAN COMPLETE". (The final profile summa
 
     // Local regex fallback name extraction on first user response
     if (questionsCount === 1) {
-      const match = newUserInput.match(/(?:my name is|i am|i'm|name is|call me)\s+([A-Za-z]+)/i);
+      const match = newUserInput.match(/(?:my name is|i am|i'm|name is|call me|this is)\s+([A-Za-z]+)/i);
       let nameToSave = '';
       if (match && match[1]) {
         nameToSave = match[1];
       } else {
+        const skipWords = new Set(['i', 'my', 'name', 'is', 'im', 'am', 'hello', 'hi', 'a', 'the', 'and', 'developer', 'engineer', 'student']);
         const words = newUserInput.split(/[\s,.]+/);
         for (const word of words) {
-          if (word && /^[A-Z][a-z]+$/.test(word) && !['i', 'my', 'name', 'is', 'im', 'am', 'hello', 'hi', 'a'].includes(word.toLowerCase())) {
-            nameToSave = word;
+          if (!word || word.length < 2) continue;
+          const cleaned = word.replace(/[^A-Za-z]/g, '');
+          if (!cleaned || skipWords.has(cleaned.toLowerCase())) continue;
+          if (/^[A-Z][a-z]+$/.test(cleaned) || /^[a-z]+$/.test(cleaned)) {
+            nameToSave = cleaned;
             break;
           }
         }
@@ -1949,8 +2007,8 @@ Start the final response with "IDENTITY SCAN COMPLETE". (The final profile summa
 
         // Parse user replies for procrastination rating, attention cycles, and stress responses
         let parsedRating = 8.0;
-        let parsedAttention = "Focus cycles peak late evening";
-        let parsedStress = "Postpones tasks under high workload pressure";
+        let parsedAttention = "";
+        let parsedStress = "";
 
         updatedHistory.forEach(msg => {
           if (msg.role === 'user') {
@@ -1983,24 +2041,26 @@ Start the final response with "IDENTITY SCAN COMPLETE". (The final profile summa
         localStorage.setItem('chronos-attention-cycle', parsedAttention);
         localStorage.setItem('chronos-stress-response', parsedStress);
 
-        // Sync everything to the backend immediately!
+        // Sync everything to the backend immediately (must complete before dashboard access)
         try {
-          fetch(`${API_BASE}/api/settings`, {
+          await fetch(`${API_BASE}/api/settings`, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({
-              username: currentUsername || 'user',
+              username: isRealUsername(currentUsername) ? currentUsername : (localStorage.getItem('chronos-username') || 'user'),
               sleepStart: Number(currentSleepStart),
               sleepEnd: Number(currentSleepEnd),
               ntfyTopic: currentNtfyTopic,
               twinProfile: summary,
               procrastinationRating: Number(parsedRating),
               attentionCycle: parsedAttention,
-              stressResponse: parsedStress
+              stressResponse: parsedStress,
+              onboardingComplete: true
             })
           });
         } catch (e) {
           console.warn("Failed to sync settings on scan complete", e);
+          toast.error("Profile saved locally but backend sync failed. Retry from Settings.");
         }
       } else {
         setChatHistory([...updatedHistory, { role: 'assistant' as const, content: reply }]);
@@ -2153,37 +2213,10 @@ Start the final response with "IDENTITY SCAN COMPLETE". (The final profile summa
           pointerEvents: isWarpActive ? 'none' : 'auto'
         }}
       >
-        <div className="relative flex items-center">
-          {particleState === 'offline' && (
-            <div className="absolute inset-0 pointer-events-none z-0 scale-150">
-              <span className="absolute w-1 h-1 bg-red-500 rounded-full animate-ping opacity-60" style={{ top: '-6px', left: '50%', animationDelay: '0s' }} />
-              <span className="absolute w-1 h-1 bg-red-500 rounded-full animate-ping opacity-45" style={{ bottom: '-6px', right: '15%', animationDelay: '0.4s' }} />
-              <span className="absolute w-1 h-1 bg-red-500 rounded-full animate-ping opacity-30" style={{ left: '-6px', top: '30%', animationDelay: '0.8s' }} />
-            </div>
-          )}
-          
-          <button
-            onClick={() => {
-              setOpenHomeSettings(!openHomeSettings);
-            }}
-            className={`p-2 rounded-xl bg-white/5 border border-white/10 hover:bg-purple-950/20 text-gray-400 hover:text-white transition-all cursor-pointer flex items-center justify-center hover:rotate-90 duration-300 focus:outline-none z-10 ${
-              particleState === 'offline' ? 'border-red-500/40 hover:border-red-500/70 hover:shadow-[0_0_15px_rgba(239,68,68,0.25)]' : 'hover:border-[#8A2BE2]/40 hover:shadow-[0_0_15px_rgba(138,43,226,0.15)]'
-            }`}
-            title="System Configuration"
-          >
-            <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-              <circle cx="12" cy="12" r="3"></circle>
-              <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"></path>
-            </svg>
-          </button>
-          
-          {particleState === 'offline' && (
-            <span className="absolute -top-1 -right-1 flex h-2.5 w-2.5">
-              <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-red-400 opacity-75"></span>
-              <span className="relative inline-flex rounded-full h-2.5 w-2.5 bg-red-500" title="Core Supplier Offline"></span>
-            </span>
-          )}
-        </div>
+        <SettingsGear
+          isOffline={particleState === 'offline'}
+          onClick={() => setOpenHomeSettings(!openHomeSettings)}
+        />
       </div>
 
       {/* Custom Settings Modal */}
@@ -2289,7 +2322,7 @@ Start the final response with "IDENTITY SCAN COMPLETE". (The final profile summa
                           onClick={() => setAiConfig(prev => {
                             const defaults: Record<string, any> = {
                               gemini: { provider: 'gemini', apiUrl: 'https://generativelanguage.googleapis.com/v1beta', model: 'gemini-1.5-flash' },
-                              nvidia: { provider: 'nvidia', apiUrl: 'https://integrate.api.nvidia.com/v1', model: 'meta/llama-3-70b-instruct' },
+                              nvidia: { provider: 'nvidia', apiUrl: 'https://integrate.api.nvidia.com/v1', model: 'meta/llama-3.1-8b-instruct' },
                               custom: { provider: 'custom', apiUrl: 'http://localhost:8000/v1', model: 'gpt-4o' }
                             };
                             return {
@@ -2398,20 +2431,29 @@ Start the final response with "IDENTITY SCAN COMPLETE". (The final profile summa
                           return;
                         }
                         localStorage.setItem('chronos-ai-config', JSON.stringify(aiConfig));
+                        localStorage.setItem('chronos-sleep-start', String(sleepStart));
+                        localStorage.setItem('chronos-sleep-end', String(sleepEnd));
+                        const toastId = toast.loading("Saving configuration...");
                         try {
+                          const payload: Record<string, unknown> = {
+                            sleepStart: Number(sleepStart),
+                            sleepEnd: Number(sleepEnd),
+                            ntfyTopic,
+                          };
+                          if (isRealUsername(username)) payload.username = username;
+                          const twin = localStorage.getItem('chronos-performance-twin');
+                          if (twin && !isPlaceholderTwin(twin)) payload.twinProfile = twin;
                           await fetch(`${API_BASE}/api/settings`, {
                             method: "POST",
                             headers: { "Content-Type": "application/json" },
-                            body: JSON.stringify({
-                              username,
-                              sleepStart: Number(sleepStart),
-                              sleepEnd: Number(sleepEnd),
-                              ntfyTopic,
-                              twinProfile: localStorage.getItem('chronos-performance-twin') || ""
-                            })
+                            body: JSON.stringify(payload)
                           });
+                          toast.dismiss(toastId);
+                          toast.success("Configuration saved.");
                         } catch (err) {
+                          toast.dismiss(toastId);
                           console.warn("Failed to sync settings on save", err);
+                          toast.error("Saved locally but backend sync failed.");
                         }
                         setOpenHomeSettings(false);
                       }}
@@ -2436,11 +2478,11 @@ Start the final response with "IDENTITY SCAN COMPLETE". (The final profile summa
                     type="button"
                     onClick={() => {
                       setOpenHomeSettings(false);
-                      router.push('/dashboard/phone-link');
+                      setSettingsTab('phone');
                     }}
                     className="w-full mt-2 py-3 rounded-xl bg-gradient-to-r from-blue-600 to-[#0099FF] hover:opacity-95 text-black font-mono font-bold text-[10px] uppercase tracking-wider transition-all cursor-pointer shadow-[0_0_15px_rgba(0,153,255,0.25)] border border-transparent"
                   >
-                    🚀 Open Phone Link Setup Wizard →
+                    📱 Configure Phone Link Below →
                   </button>
                 </div>
               )}
@@ -2586,16 +2628,6 @@ Start the final response with "IDENTITY SCAN COMPLETE". (The final profile summa
                   {!hasMemory && (
                     <div className="space-y-2 pt-3 border-t border-white/5">
                       <span className="block text-[10px] font-mono text-amber-400 uppercase">Onboarding Actions:</span>
-                      <button
-                        type="button"
-                        onClick={() => {
-                          setOpenHomeSettings(false);
-                          handleBypassOnboarding();
-                        }}
-                        className="w-full px-4 py-2.5 rounded-xl font-bold text-[10px] uppercase tracking-wider bg-purple-950/30 text-purple-200 border border-purple-500/40 hover:bg-purple-900/40 transition-all cursor-pointer flex items-center justify-center gap-2 mb-2"
-                      >
-                        ⚡ Bypass Onboarding (Auto-Type)
-                      </button>
                       <button
                         type="button"
                         onClick={() => {
@@ -2757,14 +2789,15 @@ Start the final response with "IDENTITY SCAN COMPLETE". (The final profile summa
                     method: "POST",
                     headers: { "Content-Type": "application/json" },
                     body: JSON.stringify({
-                      username,
+                      username: isRealUsername(username) ? username : (localStorage.getItem('chronos-username') || 'user'),
                       sleepStart: Number(sleepStart),
                       sleepEnd: Number(sleepEnd),
                       ntfyTopic,
                       twinProfile: profileSummary || localStorage.getItem('chronos-performance-twin') || "",
                       procrastinationRating: Number(localStorage.getItem('chronos-procrastination-rating') || 8.0),
-                      attentionCycle: localStorage.getItem('chronos-attention-cycle') || "Focus cycles peak late evening",
-                      stressResponse: localStorage.getItem('chronos-stress-response') || "Postpones tasks under high workload pressure"
+                      attentionCycle: localStorage.getItem('chronos-attention-cycle') || "",
+                      stressResponse: localStorage.getItem('chronos-stress-response') || "",
+                      onboardingComplete: true
                     })
                   });
                 } catch (err) {
@@ -3130,7 +3163,7 @@ Start the final response with "IDENTITY SCAN COMPLETE". (The final profile summa
                           ? availableModels
                           : (aiConfig.provider === 'gemini'
                               ? ['gemini-1.5-flash', 'gemini-1.5-pro', 'gemini-2.5-flash', 'gemini-2.5-pro']
-                              : ['meta/llama-3-70b-instruct', 'meta/llama-3.1-70b-instruct', 'nvidia/llama-3.1-nemotron-70b-instruct']);
+                              : ['meta/llama-3.3-70b-instruct', 'meta/llama-3.1-8b-instruct']);
                         return models.map(m => (
                           <option key={m} value={m}>{m}</option>
                         ));
@@ -3208,9 +3241,20 @@ Start the final response with "IDENTITY SCAN COMPLETE". (The final profile summa
                     <button
                       type="button"
                       onClick={handleSyncGoogleCalendar}
-                      className="flex-1 py-3 rounded-xl border border-[#06C6B3]/40 text-[#66FCF1] hover:bg-[#06C6B3]/10 transition-all font-mono text-[10px] uppercase tracking-widest cursor-pointer font-bold shadow-[0_0_15px_rgba(6,198,179,0.1)]"
+                      disabled={calendarSyncState === 'authorizing' || calendarSyncState === 'fetching'}
+                      className={`flex-1 py-3 rounded-xl border transition-all font-mono text-[10px] uppercase tracking-widest cursor-pointer font-bold shadow-[0_0_15px_rgba(6,198,179,0.1)] ${
+                        calendarSyncState === 'completed'
+                          ? 'border-emerald-400/60 text-emerald-400 bg-emerald-950/20'
+                          : calendarSyncState === 'failed'
+                            ? 'border-red-400/60 text-red-400 bg-red-950/20'
+                            : 'border-[#06C6B3]/40 text-[#66FCF1] hover:bg-[#06C6B3]/10'
+                      }`}
                     >
-                      📅 Sync Calendar Events →
+                      {calendarSyncState === 'authorizing' ? '🔑 Authorizing Google...' :
+                       calendarSyncState === 'fetching' ? '📥 Importing Events...' :
+                       calendarSyncState === 'completed' ? '✅ Synced' :
+                       calendarSyncState === 'failed' ? '❌ Connection Timed Out — Retry' :
+                       '📅 Sync Calendar Events →'}
                     </button>
                     <button
                       type="button"
@@ -3233,65 +3277,123 @@ Start the final response with "IDENTITY SCAN COMPLETE". (The final profile summa
                   </label>
                   <button
                     type="button"
-                    onClick={() => {
-                      localStorage.setItem("chronos-onboarding-in-progress", "true");
-                      router.push('/dashboard/phone-link');
-                    }}
+                    onClick={() => setPhonePanelOpen(true)}
                     className="w-full py-3 rounded-xl border border-[#0099FF]/40 text-[#66FCF1] hover:bg-[#0099FF]/10 transition-all font-mono text-[10px] uppercase tracking-widest cursor-pointer font-bold shadow-[0_0_15px_rgba(0,153,255,0.1)]"
                   >
-                    📱 Configure & Verify Phone Link →
+                    📱 Configure Phone Link →
                   </button>
                   <p className="text-[8px] text-gray-500 font-mono italic">
                     Configure real-time mobile push notifications via the secure Out-of-Band alert protocol.
                   </p>
                 </div>
 
-                {/* 8. Local Voice Daemon Setup (Mandatory) */}
-                <div className="space-y-2 pt-2 border-t border-white/5 animate-in fade-in duration-300">
+                {/* 8. Voice Daemon */}
+                <div className="space-y-3 pt-2 border-t border-white/5 animate-in fade-in duration-300">
                   <label className="block text-xs font-semibold uppercase tracking-wider text-gray-400">
-                    8. Local Voice Daemon Setup (Mandatory)
+                    8. Voice Daemon{' '}
+                    <span className={voiceDaemonOnline ? 'text-emerald-400' : 'text-[#66FCF1]'}>
+                      {voiceDaemonOnline ? '✅ Connected' : '(Required for full voice)'}
+                    </span>
                   </label>
-                  
-                  <div className="flex items-center justify-between p-3 rounded-xl bg-white/5 border border-white/10">
-                    <div className="space-y-1">
-                      <div className="flex items-center gap-2">
-                        <span className={`w-2 h-2 rounded-full ${voiceDaemonOnline ? 'bg-emerald-400 animate-pulse' : 'bg-red-400 animate-pulse'}`} />
-                        <span className="text-[10px] font-mono uppercase tracking-wider text-gray-300">
-                          Status: {voiceDaemonOnline ? 'Connected' : 'Offline'}
-                        </span>
-                      </div>
-                      <p className="text-[8px] text-gray-500 font-mono">
-                        Audio notifications bridge interface for real-time temporal alerts.
-                      </p>
-                      {!voiceDaemonOnline && (
-                        <div className="space-y-1 mt-1.5">
-                          {showDownloadPrompt && (
-                            <p className="text-[8px] text-amber-400 font-mono animate-pulse">
-                              No local daemon found. Download the voice daemon below.
-                            </p>
+
+                  {(() => {
+                    const isWindows = typeof navigator !== 'undefined' && navigator.platform?.toLowerCase().includes('win');
+                    return (
+                      <div className={`rounded-2xl border ${voiceDaemonOnline ? 'border-emerald-500/30 bg-emerald-950/20' : 'border-[#66FCF1]/20 bg-[#0d1f2d]/60'} p-4 space-y-3`}>
+
+                        {/* Status bar */}
+                        <div className="flex items-center gap-2">
+                          <span className={`w-2.5 h-2.5 rounded-full flex-shrink-0 ${voiceDaemonOnline ? 'bg-emerald-400 animate-pulse shadow-[0_0_8px_rgba(52,211,153,0.6)]' : 'bg-gray-600'}`} />
+                          <span className="text-[10px] font-mono uppercase tracking-widest text-gray-300 flex-1">
+                            {voiceDaemonOnline
+                              ? 'Voice Daemon — Connected & Active'
+                              : isWindows
+                                ? 'Voice Daemon — Not detected'
+                                : 'Voice Daemon — Windows only'}
+                          </span>
+                          {voiceDaemonOnline && (
+                            <span className="text-[8px] font-mono text-emerald-400 px-2 py-0.5 rounded-full border border-emerald-500/30 bg-emerald-950/40">LIVE</span>
                           )}
-                          <a
-                            href="/chronos_voice_daemon.exe"
-                            download="chronos_voice_daemon.exe"
-                            className="block text-[8px] text-[#66FCF1] underline font-mono hover:text-[#0099FF] transition-colors font-bold"
-                          >
-                            ⬇️ Download Voice Daemon (Windows EXE)
-                          </a>
                         </div>
-                      )}
-                    </div>
-                    
-                    {!voiceDaemonOnline && (
-                      <button
-                        type="button"
-                        onClick={handleSpawnLocalDaemon}
-                        className="px-3 py-1.5 rounded-lg bg-[#0099FF]/20 border border-[#0099FF]/40 text-[#66FCF1] hover:bg-[#0099FF]/30 transition-all font-mono text-[8px] uppercase tracking-wider cursor-pointer font-bold shrink-0"
-                      >
-                        ⚡ Launch Daemon
-                      </button>
-                    )}
-                  </div>
+
+                        {/* Description */}
+                        <p className="text-[9px] text-gray-400 font-mono leading-relaxed">
+                          The Chronos Voice Daemon runs locally on your machine. It enables global hotkey voice commands (Alt+C),
+                          proactive AI alerts spoken through your speakers, and wake-word detection — all without sending audio to the cloud.
+                        </p>
+
+                        {/* Download button — Windows only, not yet connected */}
+                        {isWindows && !voiceDaemonOnline && (
+                          <div className="space-y-2">
+                            <a
+                              href="/api/download-daemon"
+                              download="chronos_voice_daemon.exe"
+                              className="flex items-center justify-center gap-2 w-full py-2.5 rounded-xl font-bold text-[11px] uppercase tracking-wider bg-gradient-to-r from-[#06C6B3] to-[#1a7aff] text-white hover:opacity-90 transition-all shadow-[0_0_18px_rgba(6,198,179,0.25)] hover:shadow-[0_0_28px_rgba(6,198,179,0.4)] cursor-pointer"
+                            >
+                              <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5}>
+                                <path strokeLinecap="round" strokeLinejoin="round" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
+                              </svg>
+                              Download Voice Daemon (.exe · Windows)
+                            </a>
+
+                            {/* Setup steps */}
+                            <div className="rounded-xl bg-black/30 border border-white/5 p-3 space-y-1.5">
+                              <p className="text-[8px] font-bold uppercase tracking-widest text-gray-500 mb-2">Setup Instructions</p>
+                              {[
+                                '1. Download chronos_voice_daemon.exe above',
+                                '2. Run the file (no install needed — double-click)',
+                                '3. Allow network access if Windows Firewall prompts',
+                                '4. Return here — the status will turn green automatically',
+                                '5. Press Alt+C anywhere to speak to Chronos',
+                              ].map((step, i) => (
+                                <div key={i} className="flex items-start gap-2">
+                                  <span className="text-[#66FCF1] text-[8px] font-mono mt-0.5 flex-shrink-0">›</span>
+                                  <span className="text-[8px] text-gray-400 font-mono">{step}</span>
+                                </div>
+                              ))}
+                            </div>
+                          </div>
+                        )}
+
+                        {/* Capabilities */}
+                        {!voiceDaemonOnline && (
+                          <div className="grid grid-cols-2 gap-1.5">
+                            {[
+                              { icon: '🎙️', label: 'Alt+C global hotkey' },
+                              { icon: '🔊', label: 'Local Kokoro TTS' },
+                              { icon: '🧠', label: 'Proactive AI alerts' },
+                              { icon: '🔒', label: 'No cloud audio' },
+                            ].map(({ icon, label }) => (
+                              <div key={label} className="flex items-center gap-1.5 px-2 py-1.5 rounded-lg bg-white/5 border border-white/5">
+                                <span className="text-[10px]">{icon}</span>
+                                <span className="text-[8px] text-gray-400 font-mono">{label}</span>
+                              </div>
+                            ))}
+                          </div>
+                        )}
+
+                        {/* Connected state */}
+                        {voiceDaemonOnline && (
+                          <div className="flex items-center gap-2">
+                            <span className="text-[8px] text-emerald-400 font-mono">
+                              ✅ Voice daemon is active. Global hotkey (Alt+C) and proactive alerts are enabled.
+                            </span>
+                          </div>
+                        )}
+
+                        {/* macOS fallback */}
+                        {!isWindows && !voiceDaemonOnline && (
+                          <p className="text-[8px] text-amber-400 font-mono">
+                            🍎 macOS build coming soon. In the meantime, run{' '}
+                            <code className="bg-white/10 px-1 rounded">voice_daemon_exe_entry.py</code>{' '}
+                            with Python 3 from the project root.
+                          </p>
+                        )}
+                      </div>
+                    );
+                  })()}
                 </div>
+
 
                 {/* 9. Advanced Connection Settings */}
                 <details className="group border border-gray-800 rounded-lg p-2.5 bg-[#1F2833]/15 transition-all">
@@ -3318,21 +3420,16 @@ Start the final response with "IDENTITY SCAN COMPLETE". (The final profile summa
                 <div className="pt-4">
                   <button
                     type="submit"
-                    disabled={connectionStatus === 'offline' || !voiceDaemonOnline}
-                    className={`w-full py-4 rounded-2xl font-bold uppercase tracking-widest transition-all text-xs cursor-pointer ${
-                      (connectionStatus === 'offline' || !voiceDaemonOnline)
-                        ? 'bg-gray-800 border border-gray-700 text-gray-500 cursor-not-allowed'
-                        : 'bg-gradient-to-r from-[#06C6B3] to-[#8A2BE2] hover:opacity-90 text-white shadow-[0_0_20px_rgba(6,198,179,0.25)]'
-                    }`}
+                    disabled={isSavingSettings}
+                    className={`w-full py-4 rounded-2xl font-bold uppercase tracking-widest transition-all text-xs cursor-pointer bg-gradient-to-r from-[#06C6B3] to-[#8A2BE2] hover:opacity-90 text-white shadow-[0_0_20px_rgba(6,198,179,0.25)] disabled:opacity-50 disabled:cursor-not-allowed`}
                   >
-                    {connectionStatus === 'checking'
-                      ? 'Checking Connection...'
-                      : connectionStatus === 'offline'
-                        ? 'Core Offline (Reverify above)'
-                        : !voiceDaemonOnline
-                          ? 'Waiting for Voice Daemon Setup...'
-                          : 'Apply Config & Begin Diagnostics'}
+                    {isSavingSettings ? "Saving..." : "Save Settings & Continue"}
                   </button>
+                  {connectionStatus === 'offline' && (
+                    <p className="text-[8px] text-amber-400 font-mono text-center mt-2">
+                      ⚠ AI provider unreachable. Settings will be saved; Twin generation will require AI connectivity.
+                    </p>
+                  )}
                 </div>
               </form>
             </div>
@@ -3398,13 +3495,23 @@ Start the final response with "IDENTITY SCAN COMPLETE". (The final profile summa
                 </div>
               </div>
 
-              <div className="pt-2">
+              <div className="pt-2 space-y-2">
                 <button
                   onClick={handleStartScan}
-                  className="w-full py-3.5 rounded-lg font-bold text-xs uppercase tracking-wider transition-all duration-300 hover:opacity-90 hover:shadow-[0_0_20px_rgba(6,198,179,0.3)] cursor-pointer bg-gradient-to-r from-[#06C6B3] to-[#8A2BE2] text-white"
+                  disabled={connectionStatus === 'offline'}
+                  className={`w-full py-3.5 rounded-lg font-bold text-xs uppercase tracking-wider transition-all duration-300 cursor-pointer ${
+                    connectionStatus === 'offline'
+                      ? 'bg-gray-800 text-gray-500 cursor-not-allowed border border-gray-700'
+                      : 'bg-gradient-to-r from-[#06C6B3] to-[#8A2BE2] hover:opacity-90 hover:shadow-[0_0_20px_rgba(6,198,179,0.3)] text-white'
+                  }`}
                 >
                   Begin Identity Scan
                 </button>
+                {connectionStatus === 'offline' && (
+                  <p className="text-[8px] text-amber-400 font-mono text-center">
+                    ⚠ AI provider unreachable. Your settings are saved — return when connected to generate your Twin.
+                  </p>
+                )}
               </div>
             </div>
           )}
@@ -3586,6 +3693,74 @@ Start the final response with "IDENTITY SCAN COMPLETE". (The final profile summa
         </div>
       )}
       </div>
+      {phonePanelOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/85 backdrop-blur-md p-4 animate-in fade-in duration-300">
+          <div className="bg-[#0B0C10]/95 border border-[#0099FF]/30 text-gray-100 shadow-[0_0_35px_rgba(0,153,255,0.25)] rounded-3xl w-full max-w-md p-6 relative flex flex-col space-y-5 overflow-hidden">
+            <button
+              onClick={() => setPhonePanelOpen(false)}
+              className="absolute top-4 right-4 text-gray-400 hover:text-white transition-colors focus:outline-none text-base font-bold font-mono"
+            >
+              ✕
+            </button>
+
+            <div className="text-center space-y-1.5 pt-2">
+              <span className="text-3xl block select-none">📱</span>
+              <h2 className="text-base font-black uppercase tracking-widest text-[#0099FF] font-mono">
+                Mobile Phone Link
+              </h2>
+              <p className="text-[8px] font-mono text-gray-500 uppercase tracking-widest">
+                Establish Out-of-Band Warning Channel
+              </p>
+            </div>
+
+            <div className="space-y-4">
+              <div className="space-y-1.5 text-left">
+                <label className="block text-[8px] font-mono font-bold uppercase tracking-widest text-gray-400">
+                  1. ntfy Subscription Topic
+                </label>
+                <input
+                  type="text"
+                  value={ntfyTopic}
+                  readOnly
+                  className="w-full rounded-lg px-4 py-2.5 text-xs bg-[#1F2833]/20 border border-gray-800 text-gray-400 focus:outline-none transition-all font-mono select-all cursor-not-allowed"
+                />
+                <p className="text-[7px] text-gray-500 leading-normal">
+                  This unique subscription topic secures your Out-of-Band warnings channel.
+                </p>
+              </div>
+
+              <div className="p-3.5 bg-white/5 border border-white/10 rounded-2xl space-y-2 text-left">
+                <span className="text-[#0099FF] font-mono text-[8px] font-bold uppercase tracking-wider block">
+                  2. Install App & Subscribe
+                </span>
+                <ol className="list-decimal list-inside text-[8px] font-mono text-gray-400 space-y-1 pl-0.5 leading-relaxed">
+                  <li>Download <span className="text-white font-bold">ntfy</span> app from Google Play or App Store.</li>
+                  <li>Tap <span className="text-white font-bold">&quot;Subscribe to topic&quot;</span> inside the app.</li>
+                  <li>Enter topic: <code className="text-[#c084fc] font-bold bg-[#1F2833] px-1 rounded">{ntfyTopic}</code></li>
+                  <li>Enable notifications for ntfy.</li>
+                </ol>
+              </div>
+
+              <div className="p-3.5 bg-black/40 border border-white/5 rounded-2xl text-left space-y-1.5">
+                <span className="text-[8px] font-mono text-gray-500 uppercase tracking-widest block">
+                  3. Return to Dashboard
+                </span>
+                <p className="text-[8px] font-mono text-gray-400">
+                  After subscribing, access the Chronos Dashboard to test the phone link connection via Settings → Phone Link.
+                </p>
+              </div>
+
+              <button
+                type="button"
+                onClick={() => setPhonePanelOpen(false)}
+                className="w-full py-2.5 rounded-xl bg-gradient-to-r from-blue-600 to-[#0099FF] text-black font-mono text-[8px] uppercase tracking-wider transition-all cursor-pointer text-center font-bold hover:opacity-90"
+              >
+                Got it
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
       <Toaster position="top-center" theme="dark" />
     </>
   );

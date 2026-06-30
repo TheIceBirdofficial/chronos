@@ -1,0 +1,20 @@
+- generic [active] [ref=e1]:
+  - button "System Configuration" [ref=e4] [cursor=pointer]:
+    - img [ref=e5]
+  - generic [ref=e9]:
+    - generic [ref=e10]:
+      - generic:
+        - img
+      - heading "C H R N O S" [level=1] [ref=e11]:
+        - generic [ref=e12]: C
+        - generic [ref=e13]: H
+        - generic [ref=e14]: R
+        - img [ref=e16]
+        - generic [ref=e40]: "N"
+        - generic [ref=e41]: O
+        - generic [ref=e42]: S
+    - button "Scroll to begin" [ref=e44] [cursor=pointer]:
+      - generic [ref=e45]: Scroll to begin
+      - img [ref=e47]
+  - region "Notifications alt+T"
+  - alert [ref=e51]

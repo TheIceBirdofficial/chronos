@@ -19,9 +19,7 @@ sys.path.insert(0, str(PROJECT_ROOT))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import sounddevice as sd
-from openwakeword.utils import AudioFeatures
 from faster_whisper import WhisperModel
-from wakeword_utils import flatten_features
 
 MODEL_PATH = Path(__file__).resolve().parent / "chronos_wakeword.pkl"
 SAMPLE_RATE = 16000
@@ -48,6 +46,8 @@ CACHE_DIR.mkdir(parents=True, exist_ok=True)
 # State variables for TTS & Duplication prevention
 kokoro = None
 is_speaking_query = False
+_sse_recently_spoken: set = set()   # hashes of texts spoken via SSE to prevent double-play
+
 
 # Try importing soundfile and initializing Kokoro locally
 try:
@@ -213,18 +213,34 @@ def speak_locally(text: str) -> None:
     if kokoro is not None:
         try:
             import soundfile as sf
-            data, sample_rate = kokoro.create(clean_text, voice="af_bella", speed=1.15, lang="en-us")
-            sf.write(str(cache_path), data, sample_rate)
-            
-            import numpy as np
-            pad_len = int(sample_rate * 0.45)
-            silence_padding = np.zeros(pad_len, dtype=data.dtype)
-            padded_data = np.concatenate([data, silence_padding])
-            
+            # af_sky: cleaner, more neutral tone than af_bella; speed 1.0 = natural pacing
+            data, sample_rate = kokoro.create(clean_text, voice="af_sky", speed=1.0, lang="en-us")
+
+            # Trim trailing near-silence (< 1% amplitude) to avoid audible cutoff gap
+            threshold = np.max(np.abs(data)) * 0.01 if len(data) > 0 else 0
+            trimmed = np.trim_zeros(np.where(np.abs(data) > threshold, data, 0), 'b')
+            if len(trimmed) == 0:
+                trimmed = data
+
+            sf.write(str(cache_path), trimmed, sample_rate)
+
+            # Add a short natural pause after speech (250ms)
+            pad_len = int(sample_rate * 0.25)
+            silence_padding = np.zeros(pad_len, dtype=trimmed.dtype)
+            padded_data = np.concatenate([trimmed, silence_padding])
+
             sd.play(padded_data, sample_rate)
             sd.wait()
         except Exception as e:
             print(f"[Kokoro Synthesis Error] {e}")
+            # Retry with af_bella as fallback voice
+            try:
+                import soundfile as sf
+                data, sample_rate = kokoro.create(clean_text, voice="af_bella", speed=1.0, lang="en-us")
+                sd.play(data.astype(np.float32), sample_rate)
+                sd.wait()
+            except Exception:
+                pass
     else:
         print(f"[Local TTS Offline] System response: '{clean_text}'")
 
@@ -357,9 +373,16 @@ def start_sse_listener():
                                 if status == "speaking" and text:
                                     # Prevent double speech echo if Alt+C query is speaking
                                     if not is_speaking_query:
-                                        print(f"[SSE Client] Spoken alert received: '{text}'")
-                                        # Run locally on speakers asynchronously
-                                        threading.Thread(target=speak_locally, args=(text,), daemon=True).start()
+                                        # Dedup: skip if this text was already spoken by the hotkey path
+                                        import hashlib as _hlib
+                                        h = _hlib.md5(text[:80].lower().encode()).hexdigest()
+                                        if h not in _sse_recently_spoken:
+                                            _sse_recently_spoken.add(h)
+                                            if len(_sse_recently_spoken) > 40:
+                                                _sse_recently_spoken.clear()
+                                            print(f"[SSE Client] Spoken alert received: '{text}'")
+                                            # Run locally on speakers asynchronously
+                                            threading.Thread(target=speak_locally, args=(text,), daemon=True).start()
                             except Exception as parse_err:
                                 print(f"[SSE Client Parser Error] {parse_err}", flush=True)
             except Exception as e:
