@@ -1048,7 +1048,33 @@ export default function Home() {
     return () => clearInterval(interval);
   }, []);
 
+  useEffect(() => {
+    let interval: NodeJS.Timeout;
+    const tabId = Math.random().toString(36).substring(2);
+    
+    const sendHeartbeat = async () => {
+      try {
+        await fetch(`http://127.0.0.1:43210/heartbeat?tabId=${tabId}`, { mode: 'cors' });
+      } catch (e) {
+        // Ignore connection failures when daemon is not running
+      }
+    };
 
+    const handleUnload = () => {
+      navigator.sendBeacon(`http://127.0.0.1:43210/disconnect?tabId=${tabId}`);
+    };
+
+    sendHeartbeat();
+    interval = setInterval(sendHeartbeat, 3000);
+    window.addEventListener('beforeunload', handleUnload);
+
+    return () => {
+      clearInterval(interval);
+      window.removeEventListener('beforeunload', handleUnload);
+    };
+  }, []);
+
+  useEffect(() => {
     const eventSource = new EventSource(`${API_BASE}/api/voice/events`);
 
     eventSource.onmessage = (event) => {

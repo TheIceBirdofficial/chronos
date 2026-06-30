@@ -710,33 +710,45 @@ export default function Dashboard() {
   useEffect(() => {
     let interval: NodeJS.Timeout;
     const userId = getUserId();
+    const tabId = Math.random().toString(36).substring(2);
+
     const sendHeartbeat = async () => {
       try {
         const controller = new AbortController();
         const timeout = setTimeout(() => controller.abort(), 2000);
-        await fetch('http://127.0.0.1:43210/heartbeat', { mode: 'cors', signal: controller.signal });
+        await fetch(`http://127.0.0.1:43210/heartbeat?tabId=${tabId}`, { mode: 'cors', signal: controller.signal });
         clearTimeout(timeout);
       } catch (e) {
         // Daemon not running — ok
       }
     };
+
     const registerDaemon = async () => {
       try {
         await fetch('http://127.0.0.1:43210/register', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ userId })
+          body: JSON.stringify({ userId, tabId })
         });
       } catch (e) {
         // Daemon not running — ok
       }
     };
+
+    const handleUnload = () => {
+      navigator.sendBeacon(`http://127.0.0.1:43210/disconnect?tabId=${tabId}`);
+    };
+
     registerDaemon();
     sendHeartbeat();
     interval = setInterval(sendHeartbeat, 5000);
-    return () => clearInterval(interval);
-  }, []);
+    window.addEventListener('beforeunload', handleUnload);
 
+    return () => {
+      clearInterval(interval);
+      window.removeEventListener('beforeunload', handleUnload);
+    };
+  }, []);
   // Server-Sent Events listener for voice assistant commands and wakeup
   useEffect(() => {
     const eventSource = new EventSource(`${API_BASE}/api/voice/events`);

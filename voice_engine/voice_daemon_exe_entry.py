@@ -42,6 +42,8 @@ DAEMON_PORT    = 43210
 
 # ── State ────────────────────────────────────────────────────────────────
 last_heartbeat   = time.time()
+active_tabs      = set()
+grace_exit_start = 0.0
 google_api_key   = ""
 backend_url      = ""
 user_id          = ""
@@ -384,8 +386,14 @@ class DaemonHandler(BaseHTTPRequestHandler):
         self.end_headers()
 
     def do_GET(self):
-        global last_heartbeat
-        if self.path == '/status':
+        global last_heartbeat, active_tabs, grace_exit_start
+        import urllib.parse
+        parsed = urllib.parse.urlparse(self.path)
+        path = parsed.path
+        query = urllib.parse.parse_qs(parsed.query)
+        tab_id = query.get('tabId', [''])[0]
+
+        if path == '/status':
             self.send_response(200)
             self.send_header('Content-Type', 'application/json')
             self.end_headers()
@@ -397,18 +405,35 @@ class DaemonHandler(BaseHTTPRequestHandler):
                 'userId': bool(user_id),
                 'isSpeaking': is_speaking,
             }).encode())
-        elif self.path == '/heartbeat':
+        elif path == '/heartbeat':
             last_heartbeat = time.time()
+            if tab_id:
+                active_tabs.add(tab_id)
             self.send_response(200)
             self.send_header('Content-Type', 'application/json')
             self.end_headers()
             self.wfile.write(json.dumps({'status': 'acknowledged'}).encode())
+        elif path == '/disconnect':
+            if tab_id in active_tabs:
+                active_tabs.discard(tab_id)
+            if len(active_tabs) == 0:
+                grace_exit_start = time.time()
+            self.send_response(200)
+            self.send_header('Content-Type', 'application/json')
+            self.end_headers()
+            self.wfile.write(json.dumps({'status': 'disconnected'}).encode())
         else:
             self.send_response(404)
             self.end_headers()
 
     def do_POST(self):
-        global user_id, google_api_key, backend_url
+        global user_id, google_api_key, backend_url, active_tabs, grace_exit_start
+        import urllib.parse
+        parsed = urllib.parse.urlparse(self.path)
+        path = parsed.path
+        query = urllib.parse.parse_qs(parsed.query)
+        tab_id = query.get('tabId', [''])[0]
+
         content_len = int(self.headers.get('Content-Length', 0))
         body = self.rfile.read(content_len) if content_len else b'{}'
         try:
@@ -416,17 +441,29 @@ class DaemonHandler(BaseHTTPRequestHandler):
         except Exception:
             data = {}
 
-        if self.path == '/register':
+        if path == '/register':
             uid = data.get('userId', '')
             if uid:
                 user_id = uid
                 print(f"[Daemon] Registered user: {user_id}", flush=True)
+            tid = data.get('tabId', tab_id)
+            if tid:
+                active_tabs.add(tid)
             self.send_response(200)
             self.send_header('Content-Type', 'application/json')
             self.end_headers()
             self.wfile.write(json.dumps({'status': 'registered'}).encode())
-        elif self.path == '/interrupt':
-            # Called by browser to stop current speech
+        elif path == '/disconnect':
+            tid = data.get('tabId', tab_id)
+            if tid in active_tabs:
+                active_tabs.discard(tid)
+            if len(active_tabs) == 0:
+                grace_exit_start = time.time()
+            self.send_response(200)
+            self.send_header('Content-Type', 'application/json')
+            self.end_headers()
+            self.wfile.write(json.dumps({'status': 'disconnected'}).encode())
+        elif path == '/interrupt':
             interrupt_speech()
             self.send_response(200)
             self.send_header('Content-Type', 'application/json')
@@ -484,22 +521,30 @@ def ping_loop():
 
 # ── Heartbeat monitor ─────────────────────────────────────────────────────
 def heartbeat_monitor():
-    """Kill daemon when browser closes (no heartbeat for HEARTBEAT_TIMEOUT + 5s)."""
+    """Kill daemon when browser closes (no active tabs for 5s, or no heartbeat for HEARTBEAT_TIMEOUT)."""
+    global grace_exit_start
     if standalone:
         return
     time.sleep(15)  # grace period on startup
     while True:
-        elapsed = time.time() - last_heartbeat
+        now = time.time()
+        # 1. Total silence timeout (heartbeat stopped completely without sending disconnect)
+        elapsed = now - last_heartbeat
         if elapsed > HEARTBEAT_TIMEOUT:
-            print(f"[Daemon] No heartbeat for {elapsed:.0f}s. Waiting 5s grace...", flush=True)
-            _set_tray_status("Disconnected")
-            time.sleep(5)
-            # Re-check — a reconnect may have arrived during the grace period
-            if time.time() - last_heartbeat > HEARTBEAT_TIMEOUT:
-                print("[Daemon] Still no heartbeat. Shutting down.", flush=True)
-                _exit_daemon()
-        time.sleep(2)
+            print(f"[Daemon] Hard timeout: no heartbeat for {elapsed:.0f}s. Shutting down.", flush=True)
+            _exit_daemon()
 
+        # 2. Tab-close count down (active tabs became 0)
+        if len(active_tabs) == 0 and grace_exit_start > 0:
+            grace_elapsed = now - grace_exit_start
+            if grace_elapsed >= 5.0:
+                print(f"[Daemon] Zero tabs remaining for {grace_elapsed:.1f}s. Shutting down.", flush=True)
+                _exit_daemon()
+        else:
+            # reset grace if tabs reconnect
+            grace_exit_start = 0.0
+
+        time.sleep(1)
 # ── Main ──────────────────────────────────────────────────────────────────
 if __name__ == '__main__':
     # Redirect all stdout/stderr to log file to stay completely silent
