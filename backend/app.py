@@ -4078,9 +4078,11 @@ def update_google_calendar_event(task):
         due_dt = datetime.datetime.fromisoformat(due_clean)
         est_hours = float(task.get('estimatedHours', 1))
         start_dt = due_dt - datetime.timedelta(hours=est_hours)
+        is_completed = task.get('completed', False)
+        prefix = "✅ " if is_completed else ""
         body = {
-            "summary": task.get('title', 'Chronos Task'),
-            "description": f"Chronos Task | Importance: {task.get('importance','medium')}",
+            "summary": prefix + task.get('title', 'Chronos Task'),
+            "description": f"Chronos Task | Importance: {task.get('importance','medium')} | Status: {'Secured' if is_completed else 'Active'}",
             "start": {"dateTime": start_dt.isoformat(), "timeZone": "UTC"},
             "end":   {"dateTime": due_dt.isoformat(),   "timeZone": "UTC"},
         }

@@ -136,6 +136,82 @@ const renderFormattedText = (text: string) => {
   });
 };
 
+const getFormattedPONR = (task: any): { text: string; isPassed: boolean } => {
+  if (!task) return { text: "Secure", isPassed: false };
+  if (task.completed) {
+    return { text: "Secure", isPassed: false };
+  }
+  let ponrStr = task.pointOfNoReturn || "";
+  if (ponrStr === "Deadline Secure") {
+    return { text: "Secure", isPassed: false };
+  }
+  if (ponrStr === "Deadline Collapse Passed" || ponrStr === "Passed" || ponrStr.toLowerCase().includes("pass")) {
+    return { text: "Point of No Return Passed", isPassed: true };
+  }
+
+  try {
+    let targetDate: Date | null = null;
+    const now = new Date();
+    
+    if (ponrStr.startsWith("Today,")) {
+      const timeStr = ponrStr.replace("Today,", "").trim();
+      targetDate = parseTimeString(timeStr, now);
+    } else if (ponrStr.startsWith("Tomorrow,")) {
+      const timeStr = ponrStr.replace("Tomorrow,", "").trim();
+      const tomorrow = new Date(now);
+      tomorrow.setDate(tomorrow.getDate() + 1);
+      targetDate = parseTimeString(timeStr, tomorrow);
+    } else {
+      const parts = ponrStr.split(",");
+      if (parts.length === 2) {
+        const dateStr = parts[0].trim();
+        const timeStr = parts[1].trim();
+        const currentYear = now.getFullYear();
+        const parsedBase = Date.parse(`${dateStr} ${currentYear}`);
+        if (!isNaN(parsedBase)) {
+          const baseDate = new Date(parsedBase);
+          targetDate = parseTimeString(timeStr, baseDate);
+        }
+      }
+    }
+
+    if (targetDate && targetDate.getTime() < now.getTime()) {
+      return { text: "Point of No Return Passed", isPassed: true };
+    }
+  } catch (e) {}
+
+  if (task.due) {
+    const dueTime = new Date(task.due).getTime();
+    const estMs = (task.estimatedHours || 1) * 3600000;
+    const calculatedPonr = dueTime - estMs;
+    if (Date.now() > calculatedPonr) {
+      return { text: "Point of No Return Passed", isPassed: true };
+    }
+  }
+
+  return { text: ponrStr || "Extended", isPassed: false };
+};
+
+const parseTimeString = (timeStr: string, baseDate: Date): Date => {
+  const match = timeStr.match(/(\d+):(\d+)\s*(AM|PM)/i);
+  if (!match) return baseDate;
+  let hours = parseInt(match[1], 10);
+  const minutes = parseInt(match[2], 10);
+  const ampm = match[3].toUpperCase();
+  if (ampm === "PM" && hours < 12) hours += 12;
+  if (ampm === "AM" && hours === 12) hours = 0;
+  
+  const d = new Date(baseDate);
+  d.setHours(hours, minutes, 0, 0);
+  return d;
+};
+
+const getDefaultTargetTimeStr = (): string => {
+  const d = new Date();
+  d.setHours(d.getHours() + 2);
+  return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
+};
+
 export default function Dashboard() {
   const router = useRouter();
   const [isTransitioning, setIsTransitioning] = useState(true);
@@ -450,7 +526,34 @@ export default function Dashboard() {
     finalDate.setMinutes(parseInt(min));
     finalDate.setSeconds(0);
     finalDate.setMilliseconds(0);
-    setNewDue(finalDate.toISOString());
+    
+    const now = new Date();
+    if (finalDate <= now) {
+      // Clamp to exactly 1 hour from now, rounded to the next 5 minutes
+      const clamped = new Date(now.getTime() + 60 * 60000);
+      let roundedMin = Math.ceil(clamped.getMinutes() / 5) * 5;
+      if (roundedMin >= 60) {
+        roundedMin = 0;
+        clamped.setHours(clamped.getHours() + 1);
+      }
+      clamped.setMinutes(roundedMin);
+      clamped.setSeconds(0);
+      clamped.setMilliseconds(0);
+      
+      const newH = clamped.getHours();
+      const newMinStr = String(roundedMin).padStart(2, '0');
+      const newAmPm = newH >= 12 ? "PM" : "AM";
+      let displayH = newH % 12;
+      if (displayH === 0) displayH = 12;
+      
+      setPickerHour(String(displayH));
+      setPickerMinute(newMinStr);
+      setPickerAmPm(newAmPm);
+      setNewDue(clamped.toISOString());
+      toast.warning("Deadline time automatically adjusted to future timeframe.");
+    } else {
+      setNewDue(finalDate.toISOString());
+    }
   };
 
   const checkSleepOverlap = () => {
@@ -651,6 +754,11 @@ export default function Dashboard() {
     latency: null
   });
 
+  // Stable tabId for voice daemon — generated once per session
+  const tabIdRef = useRef<string>(typeof crypto !== 'undefined' ? crypto.randomUUID() : Math.random().toString(36).substring(2));
+  // Heartbeat failure counter for exponential backoff
+  const heartbeatFailCountRef = useRef<number>(0);
+
   // Periodic Voice Daemon Status Check
   useEffect(() => {
     const checkVoiceStatus = async () => {
@@ -708,18 +816,30 @@ export default function Dashboard() {
   }, []);
 
   useEffect(() => {
+    let mounted = true;
     let interval: NodeJS.Timeout;
     const userId = getUserId();
-    const tabId = Math.random().toString(36).substring(2);
+    const tabId = tabIdRef.current;
 
     const sendHeartbeat = async () => {
+      if (!mounted) return;
+      // Exponential backoff: slow down polling after repeated failures
+      // Base interval 5s → up to 60s after many failures
+      const failCount = heartbeatFailCountRef.current;
+      if (failCount > 0) {
+        const backoffMultiplier = Math.min(failCount, 12); // cap at 12x
+        // Only fire every N-th tick when backing off
+        if (Math.random() > 1 / backoffMultiplier) return;
+      }
       try {
         const controller = new AbortController();
         const timeout = setTimeout(() => controller.abort(), 2000);
         await fetch(`http://127.0.0.1:43210/heartbeat?tabId=${tabId}`, { mode: 'cors', signal: controller.signal });
         clearTimeout(timeout);
+        if (mounted) heartbeatFailCountRef.current = 0; // reset on success
       } catch (e) {
-        // Daemon not running — ok
+        // Daemon not running — optional feature, suppress error
+        if (mounted) heartbeatFailCountRef.current += 1;
       }
     };
 
@@ -745,6 +865,7 @@ export default function Dashboard() {
     window.addEventListener('beforeunload', handleUnload);
 
     return () => {
+      mounted = false;
       clearInterval(interval);
       window.removeEventListener('beforeunload', handleUnload);
     };
@@ -1612,7 +1733,7 @@ Keep the tone clinical, diagnostic, and highly personalized. Start immediately w
     try {
       const scheduleContext = tasks
         .filter(t => !t.completed)
-        .map(t => `- "${t.title}": Est effort ${t.estimatedHours}h, due ${new Date(t.due).toLocaleString('en-GB')}, Risk/Survival score: ${t.survivalScore}%`)
+        .map(t => `- "${t.title}": Est effort ${t.estimatedHours}h, due ${t.due ? new Date(t.due).toLocaleString('en-GB') : 'no deadline'}, Risk/Survival score: ${t.survivalScore ?? 'N/A'}%`)
         .join("\n");
         
       const systemPrompt = `You are Chronos, a tactical AI deadline defense system. 
@@ -1796,7 +1917,7 @@ Generate the tactical calendar debrief now.`;
     try {
       const activeTasksStr = tasks
         .filter(t => !t.completed)
-        .map(t => `'${t.title}' (Score: ${t.survivalScore}%, due in ${t.riskAnalysis?.timeRemaining}h, est: ${t.riskAnalysis?.workRemaining}h)`)
+        .map(t => `'${t.title}' (Score: ${t.survivalScore ?? 'N/A'}%, due in ${t.riskAnalysis?.timeRemaining ?? '?'}h, est: ${t.riskAnalysis?.workRemaining ?? '?'}h)`)
         .join(", ");
       const tasksInfo = activeTasksStr ? ` Active tasks: ${activeTasksStr}.` : "";
       
@@ -3357,7 +3478,7 @@ Your current plan is achievable based on the estimated hours alone. Re-run the A
                                     ? 'bg-amber-950/40 border border-amber-500/30 text-amber-300'
                                     : 'bg-green-950/40 border border-green-500/30 text-green-300'
                             }`}
-                            title={`${t.title} (${t.survivalScore}% survival)`}
+                            title={`${t.title} (${t.survivalScore ?? 100}% survival)`}
                           >
                             {t.completed ? '✓ ' : ''}{t.title}
                           </div>
@@ -3546,7 +3667,7 @@ Your current plan is achievable based on the estimated hours alone. Re-run the A
             <div className="absolute bottom-4 left-1/2 -translate-x-1/2 z-20 flex flex-col items-center gap-2">
               <span className="text-[10px] font-mono tracking-wider text-gray-400 uppercase bg-black/40 px-3 py-1 rounded-full border border-white/5 backdrop-blur-md">
                 {resolvedState === 'offline' ? (
-                  <span className="text-red-400 font-semibold animate-pulse">● System Sync Fallback Active</span>
+                  <span className="text-red-400 font-semibold animate-pulse" title="Local AI Core is optional — it enables voice AI features. Run the Voice Daemon locally to activate.">● Local AI Core Offline</span>
                 ) : resolvedState === 'listening' ? (
                   <span className="text-[#0099FF] animate-pulse">● Listening... Speak Command</span>
                 ) : resolvedState === 'thinking' ? (
@@ -3635,7 +3756,13 @@ Your current plan is achievable based on the estimated hours alone. Re-run the A
               </div>
             ) : (
               <div className="flex-1 overflow-y-auto pr-2 custom-scrollbar space-y-4">
-                {tasks.map(task => {
+                {[...tasks].sort((a, b) => {
+                  // Sort by due date ascending (soonest deadline first)
+                  if (!a.due && !b.due) return 0;
+                  if (!a.due) return 1;
+                  if (!b.due) return -1;
+                  return new Date(a.due).getTime() - new Date(b.due).getTime();
+                }).map(task => {
                   const score = task.survivalScore ?? 100;
                   const escalation = task.escalationLevel ?? 'green';
                   const isCritical = escalation === 'black' || escalation === 'red';
@@ -3680,7 +3807,7 @@ Your current plan is achievable based on the estimated hours alone. Re-run the A
                             </Badge>
                           </div>
                           <span className="text-[9px] font-mono text-gray-500 uppercase tracking-wider block ml-0">
-                            Due: {new Date(task.due).toLocaleString('en-GB', { dateStyle: 'short', timeStyle: 'short' })} · {hoursLeft > 0 ? `${hoursLeft}h remaining` : 'PAST DUE'}
+                            Due: {task.due ? new Date(task.due).toLocaleString('en-GB', { dateStyle: 'short', timeStyle: 'short' }) : 'No deadline'} · {hoursLeft > 0 ? `${hoursLeft}h remaining` : (task.due ? 'PAST DUE' : '—')}
                           </span>
                         </div>
                         
@@ -3732,14 +3859,17 @@ Your current plan is achievable based on the estimated hours alone. Re-run the A
                           </div>
 
                           {/* Point Of No Return display */}
-                          {!task.completed && (
-                            <div className="text-[9px] font-mono tracking-widest uppercase flex items-center gap-1 bg-black/40 px-3 py-1 rounded-full border border-white/5">
-                              <span className="text-gray-600">No Return:</span>
-                              <span className={isCritical ? "text-[#EF4444] font-bold animate-pulse" : "text-[#bf5af2]"}>
-                                {task.pointOfNoReturn}
-                              </span>
-                            </div>
-                          )}
+                          {!task.completed && (() => {
+                            const ponrInfo = getFormattedPONR(task);
+                            return (
+                              <div className="text-[9px] font-mono tracking-widest uppercase flex items-center gap-1 bg-black/40 px-3 py-1 rounded-full border border-white/5" title={ponrInfo.isPassed ? "Time Window Expired" : ""}>
+                                <span className="text-gray-600">No Return:</span>
+                                <span className={ponrInfo.isPassed ? "text-[#EF4444] font-bold animate-pulse" : (isCritical ? "text-[#EF4444] font-bold animate-pulse" : "text-[#bf5af2]")}>
+                                  {ponrInfo.text}
+                                </span>
+                              </div>
+                            );
+                          })()}
                         </div>
 
                         {/* Survival Score Meter */}
@@ -3996,8 +4126,8 @@ Your current plan is achievable based on the estimated hours alone. Re-run the A
       )}
       {rescuingTaskId && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-md p-4 transition-all duration-300">
-          <div className="relative w-full max-w-4xl bg-[#0B0C10]/95 rounded-3xl border border-[#8A2BE2]/30 p-6 md:p-8 shadow-[0_15px_50px_rgba(138,43,226,0.3)] backdrop-blur-xl space-y-5 animate-in fade-in zoom-in-95 duration-200">
-            <div className="flex justify-between items-center border-b border-gray-900 pb-3">
+          <div className="relative w-full max-w-4xl max-h-[90vh] bg-[#0B0C10]/95 rounded-3xl border border-[#8A2BE2]/30 p-6 md:p-8 shadow-[0_15px_50px_rgba(138,43,226,0.3)] backdrop-blur-xl flex flex-col justify-between overflow-hidden animate-in fade-in zoom-in-95 duration-200">
+            <div className="flex justify-between items-center border-b border-gray-900 pb-3 flex-shrink-0">
               <div>
                 <h3 className="text-base font-bold uppercase tracking-widest text-[#8A2BE2]">
                   Chronos Active Intervention: Recovery Protocol
@@ -4014,161 +4144,186 @@ Your current plan is achievable based on the estimated hours alone. Re-run the A
               </button>
             </div>
 
-            {rescueLoading ? (
-              <RecoveryLoadingPipeline isActive={rescueLoading} />
-            ) : rescueError ? (
-              <div className="flex flex-col items-center justify-center py-12 space-y-4">
-                <div className="w-10 h-10 rounded-full border-2 border-red-500/40 flex items-center justify-center">
-                  <span className="text-red-400 text-lg">⚠</span>
-                </div>
-                <p className="text-xs text-red-300 font-mono text-center max-w-sm">{rescueError}</p>
-                <button
-                  onClick={() => rescueData && triggerAiRescue(rescueData)}
-                  disabled={rescueLoading}
-                  className="px-4 py-2 rounded-lg bg-red-950/40 border border-red-500/40 text-red-300 hover:bg-red-900/40 text-[10px] font-bold uppercase tracking-wider transition-all cursor-pointer disabled:opacity-40"
-                >
-                  Retry Recovery Protocol
-                </button>
-              </div>
-            ) : rescueBriefing ? (
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-6 items-stretch max-h-[70vh] overflow-y-auto custom-scrollbar pr-1">
-                <RecoveryBriefing briefing={rescueBriefing} />
-
-                {/* Right Column: Negotiation Chat */}
-                <div className="border border-gray-800 bg-black/30 rounded-2xl p-4 flex flex-col justify-between h-[420px] font-sans">
-                  <div className="text-[10px] font-mono text-gray-500 uppercase tracking-widest border-b border-white/5 pb-1.5 mb-2">
-                    💬 Collaborate with Recovery Agent
+            <div className="flex-1 overflow-y-auto pr-1 my-2 custom-scrollbar min-h-0">
+              {rescueLoading ? (
+                <RecoveryLoadingPipeline isActive={rescueLoading} />
+              ) : rescueError ? (
+                <div className="flex flex-col items-center justify-center py-12 space-y-4">
+                  <div className="w-10 h-10 rounded-full border-2 border-red-500/40 flex items-center justify-center">
+                    <span className="text-red-400 text-lg">⚠</span>
                   </div>
-
-                  <div ref={recoveryChatEndRef} className="flex-1 overflow-y-auto space-y-2.5 pr-1 scrollbar-thin text-xs mb-2">
-                    {recoveryChatHistory.map((msg, idx) => (
-                      <div key={idx} className={`p-2.5 rounded-xl max-w-[85%] leading-relaxed ${
-                        msg.role === 'user'
-                          ? 'bg-[#8A2BE2]/10 border border-[#8A2BE2]/20 text-purple-200 ml-auto text-right font-mono text-[11px]'
-                          : 'bg-[#1F2833]/40 border border-gray-800 text-cyan-200 mr-auto text-left text-[11px]'
-                      }`}>
-                        {msg.content}
-                      </div>
-                    ))}
-                    {recoveryChatLoading && (
-                      <div className="text-[#06C6B3] font-mono text-[9px] animate-pulse">Agent is updating recovery timeline...</div>
-                    )}
-                  </div>
-
-                  <form onSubmit={handleSendRecoveryChatMessage} className="flex gap-2 border-t border-white/5 pt-2">
-                    <input
-                      type="text"
-                      placeholder="Ask the AI to modify or adjust the checklist steps..."
-                      value={recoveryChatInput}
-                      onChange={e => setRecoveryChatInput(e.target.value)}
-                      disabled={recoveryChatLoading}
-                      className="flex-1 rounded-xl px-3 py-2 text-xs focus:outline-none bg-[#1F2833]/30 text-gray-200 border border-gray-800"
-                    />
-                    <button
-                      type="submit"
-                      disabled={recoveryChatLoading}
-                      className="px-4 py-2 bg-[#8A2BE2] hover:opacity-90 text-white rounded-xl text-xs font-bold uppercase tracking-wider disabled:opacity-50 cursor-pointer"
-                    >
-                      Negotiate
-                    </button>
-                  </form>
+                  <p className="text-xs text-red-300 font-mono text-center max-w-sm">{rescueError}</p>
+                  <button
+                    onClick={() => rescueData && triggerAiRescue(rescueData)}
+                    disabled={rescueLoading}
+                    className="px-4 py-2 rounded-lg bg-red-950/40 border border-red-500/40 text-red-300 hover:bg-red-900/40 text-[10px] font-bold uppercase tracking-wider transition-all cursor-pointer disabled:opacity-40"
+                  >
+                    Retry Recovery Protocol
+                  </button>
                 </div>
-              </div>
-            ) : rescueData ? (
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-6 items-stretch">
-                <div className="space-y-4 flex flex-col justify-between">
-                  <div className="space-y-4">
-                    <div className="grid grid-cols-2 gap-4 bg-black/40 border border-white/5 p-4 rounded-2xl text-center">
-                      <div className="border-r border-white/5 space-y-1">
-                        <span className="text-[8px] text-red-500 uppercase tracking-widest block font-bold font-mono">Before Recovery</span>
-                        <div className="text-lg font-bold text-red-400">{rescueData.survivalScoreBeforeRecovery ?? rescueData.survivalScore ?? 31}% Survival</div>
-                      </div>
-                      <div className="space-y-1">
-                        <span className="text-[8px] text-[#66FCF1] uppercase tracking-widest block font-bold font-mono">After Recovery</span>
-                        <div className="text-lg font-bold text-[#66FCF1]">{rescueData.recoveryForecast ?? rescueData.survivalScore ?? 78}% Success</div>
-                      </div>
+              ) : rescueBriefing ? (
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-6 items-stretch max-h-[70vh] overflow-y-auto custom-scrollbar pr-1">
+                  <RecoveryBriefing briefing={rescueBriefing} />
+
+                  {/* Right Column: Negotiation Chat */}
+                  <div className="border border-gray-800 bg-black/30 rounded-2xl p-4 flex flex-col justify-between h-[420px] font-sans">
+                    <div className="text-[10px] font-mono text-gray-500 uppercase tracking-widest border-b border-white/5 pb-1.5 mb-2">
+                      💬 Collaborate with Recovery Agent
                     </div>
 
-                    <div className="bg-[#1F2833]/30 border border-gray-800 p-5 rounded-2xl space-y-3 font-sans">
-                      <h4 className="text-xs font-bold uppercase text-[#66FCF1] tracking-wider border-b border-white/5 pb-1 flex items-center gap-1.5">
-                        <span>🎯</span> Active Recovery Checklist
-                      </h4>
-                      {rescueData.rescueResources?.checklist?.length ? (
-                        <ul className="space-y-2 text-xs text-gray-300 font-mono">
-                          {rescueData.rescueResources.checklist.map((item: string, idx: number) => (
-                            <li key={idx} className="flex items-start gap-2 bg-black/20 p-2.5 rounded-xl border border-white/5">
-                              <span className="text-[#8A2BE2] font-bold">{idx + 1}.</span>
-                              <span>{item}</span>
-                            </li>
-                          ))}
-                        </ul>
-                      ) : (
-                        <div className="space-y-2 text-xs text-gray-500 font-mono">
-                          <p>Recovery checklist is still compiling.</p>
-                          <button
-                            type="button"
-                            onClick={() => rescueData && triggerAiRescue(rescueData)}
-                            disabled={!rescueData || rescueLoading}
-                            className="px-3 py-1.5 rounded-lg bg-amber-500/10 border border-amber-500/30 text-amber-200 disabled:opacity-40"
-                          >
-                            {rescueLoading ? "Compiling..." : "Retry Recovery Build"}
-                          </button>
+                    <div ref={recoveryChatEndRef} className="flex-1 overflow-y-auto space-y-2.5 pr-1 scrollbar-thin text-xs mb-2">
+                      {recoveryChatHistory.map((msg, idx) => (
+                        <div key={idx} className={`p-2.5 rounded-xl max-w-[85%] leading-relaxed ${
+                          msg.role === 'user'
+                            ? 'bg-[#8A2BE2]/10 border border-[#8A2BE2]/20 text-purple-200 ml-auto text-right font-mono text-[11px]'
+                            : 'bg-[#1F2833]/40 border border-gray-800 text-cyan-200 mr-auto text-left text-[11px]'
+                        }`}>
+                          {msg.content}
                         </div>
+                      ))}
+                      {recoveryChatLoading && (
+                        <div className="text-[#06C6B3] font-mono text-[9px] animate-pulse">Agent is updating recovery timeline...</div>
                       )}
                     </div>
-                  </div>
 
-                  {rescueData && (
-                    <div className="text-[9px] font-mono text-gray-500 uppercase tracking-wider bg-black/30 p-3 rounded-xl border border-white/5">
-                      New Point Of No Return: <span className="text-[#bf5af2] font-bold">{rescueData.newPointOfNoReturn || "Extended"}</span>
-                    </div>
-                  )}
+                    <form onSubmit={handleSendRecoveryChatMessage} className="flex gap-2 border-t border-white/5 pt-2">
+                      <input
+                        type="text"
+                        placeholder="Ask the AI to modify or adjust the checklist steps..."
+                        value={recoveryChatInput}
+                        onChange={e => setRecoveryChatInput(e.target.value)}
+                        disabled={recoveryChatLoading}
+                        className="flex-1 rounded-xl px-3 py-2 text-xs focus:outline-none bg-[#1F2833]/30 text-gray-200 border border-gray-800"
+                      />
+                      <button
+                        type="submit"
+                        disabled={recoveryChatLoading}
+                        className="px-4 py-2 bg-[#8A2BE2] hover:opacity-90 text-white rounded-xl text-xs font-bold uppercase tracking-wider disabled:opacity-50 cursor-pointer"
+                      >
+                        Negotiate
+                      </button>
+                    </form>
+                  </div>
                 </div>
-
-                {/* Right Column: Negotiation Chat */}
-                <div className="border border-gray-800 bg-black/30 rounded-2xl p-4 flex flex-col justify-between h-[360px] font-sans">
-                  <div className="text-[10px] font-mono text-gray-500 uppercase tracking-widest border-b border-white/5 pb-1.5 mb-2">
-                    💬 Collaborate with Recovery Agent
-                  </div>
-
-                  <div ref={recoveryChatEndRef} className="flex-1 overflow-y-auto space-y-2.5 pr-1 scrollbar-thin text-xs mb-2">
-                    {recoveryChatHistory.map((msg, idx) => (
-                      <div key={idx} className={`p-2.5 rounded-xl max-w-[85%] leading-relaxed ${
-                        msg.role === 'user'
-                          ? 'bg-[#8A2BE2]/10 border border-[#8A2BE2]/20 text-purple-200 ml-auto text-right font-mono text-[11px]'
-                          : 'bg-[#1F2833]/40 border border-gray-800 text-cyan-200 mr-auto text-left text-[11px]'
-                      }`}>
-                        {msg.content}
+              ) : rescueData ? (
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-6 items-stretch">
+                  <div className="space-y-4 flex flex-col justify-between">
+                    <div className="space-y-4">
+                      {/* Mission Briefing offline fallback warning */}
+                      <div className="bg-amber-500/10 border border-amber-500/30 p-4 rounded-2xl text-center space-y-1.5">
+                        <div className="text-xs font-bold text-amber-400">⚠️ Mission Briefing Unavailable</div>
+                        <p className="text-[10px] text-gray-400 font-sans leading-relaxed">
+                          Connect the optional Local AI Core to enable personalized mission briefings.
+                        </p>
                       </div>
-                    ))}
-                    {recoveryChatLoading && (
-                      <div className="text-[#06C6B3] font-mono text-[9px] animate-pulse">Agent is updating recovery timeline...</div>
-                    )}
+
+                      <div className="grid grid-cols-2 gap-4 bg-black/40 border border-white/5 p-4 rounded-2xl text-center">
+                        <div className="border-r border-white/5 space-y-1">
+                          <span className="text-[8px] text-red-500 uppercase tracking-widest block font-bold font-mono">Before Recovery</span>
+                          <div className="text-lg font-bold text-red-400">{rescueData.survivalScoreBeforeRecovery ?? rescueData.survivalScore ?? 31}% Survival</div>
+                        </div>
+                        <div className="space-y-1">
+                          <span className="text-[8px] text-[#66FCF1] uppercase tracking-widest block font-bold font-mono">After Recovery</span>
+                          <div className="text-lg font-bold text-[#66FCF1]">{rescueData.recoveryForecast ?? rescueData.survivalScore ?? 78}% Success</div>
+                        </div>
+                      </div>
+
+                      <div className="bg-[#1F2833]/30 border border-gray-800 p-5 rounded-2xl space-y-3 font-sans">
+                        <h4 className="text-xs font-bold uppercase text-[#66FCF1] tracking-wider border-b border-white/5 pb-1 flex items-center gap-1.5">
+                          <span>🎯</span> Active Recovery Checklist
+                        </h4>
+                        {rescueData.rescueResources?.checklist?.length ? (
+                          <ul className="space-y-2 text-xs text-gray-300 font-mono">
+                            {rescueData.rescueResources.checklist.map((item: string, idx: number) => (
+                              <li key={idx} className="flex items-start gap-2 bg-black/20 p-2.5 rounded-xl border border-white/5">
+                                <span className="text-[#8A2BE2] font-bold">{idx + 1}.</span>
+                                <span>{item}</span>
+                              </li>
+                            ))}
+                          </ul>
+                        ) : (
+                          <div className="space-y-2 text-xs text-gray-500 font-mono">
+                            <p>Recovery checklist is still compiling.</p>
+                            <button
+                              type="button"
+                              onClick={() => rescueData && triggerAiRescue(rescueData)}
+                              disabled={!rescueData || rescueLoading}
+                              className="px-3 py-1.5 rounded-lg bg-amber-500/10 border border-amber-500/30 text-amber-200 disabled:opacity-40"
+                            >
+                              {rescueLoading ? "Compiling..." : "Retry Recovery Build"}
+                            </button>
+                          </div>
+                        )}
+                      </div>
+                    </div>
+
+                    {rescueData && (() => {
+                      const ponrInfo = getFormattedPONR({ ...rescueData, pointOfNoReturn: rescueData.newPointOfNoReturn });
+                      const savedTime = localStorage.getItem(`chronos-recovery-target-time-${rescueData.id}`) || getDefaultTargetTimeStr();
+                      return (
+                        <div className="text-[9px] font-mono text-gray-500 uppercase tracking-wider bg-black/30 p-3 rounded-xl border border-white/5 flex flex-col gap-1.5">
+                          <div>
+                            New Point Of No Return:{" "}
+                            <span className={ponrInfo.isPassed ? "text-red-400 font-bold" : "text-[#bf5af2] font-bold"}>
+                              {ponrInfo.text}
+                            </span>
+                          </div>
+                          <div>
+                            Target Completion Time:{" "}
+                            <span className="text-[#66FCF1] font-bold">
+                              ⏳ Complete by {savedTime}
+                            </span>
+                          </div>
+                        </div>
+                      );
+                    })()}
                   </div>
 
-                  <form onSubmit={handleSendRecoveryChatMessage} className="flex gap-2 border-t border-white/5 pt-2">
-                    <input
-                      type="text"
-                      placeholder="Ask the AI to modify or adjust the checklist steps..."
-                      value={recoveryChatInput}
-                      onChange={e => setRecoveryChatInput(e.target.value)}
-                      disabled={recoveryChatLoading}
-                      className="flex-1 rounded-xl px-3 py-2 text-xs focus:outline-none bg-[#1F2833]/30 text-gray-200 border border-gray-800"
-                    />
-                    <button
-                      type="submit"
-                      disabled={recoveryChatLoading}
-                      className="px-4 py-2 bg-[#8A2BE2] hover:opacity-90 text-white rounded-xl text-xs font-bold uppercase tracking-wider disabled:opacity-50 cursor-pointer"
-                    >
-                      Negotiate
-                    </button>
-                  </form>
+                  {/* Right Column: Negotiation Chat */}
+                  <div className="border border-gray-800 bg-black/30 rounded-2xl p-4 flex flex-col justify-between h-[360px] font-sans">
+                    <div className="text-[10px] font-mono text-gray-500 uppercase tracking-widest border-b border-white/5 pb-1.5 mb-2">
+                      💬 Collaborate with Recovery Agent
+                    </div>
+
+                    <div ref={recoveryChatEndRef} className="flex-1 overflow-y-auto space-y-2.5 pr-1 scrollbar-thin text-xs mb-2">
+                      {recoveryChatHistory.map((msg, idx) => (
+                        <div key={idx} className={`p-2.5 rounded-xl max-w-[85%] leading-relaxed ${
+                          msg.role === 'user'
+                            ? 'bg-[#8A2BE2]/10 border border-[#8A2BE2]/20 text-purple-200 ml-auto text-right font-mono text-[11px]'
+                            : 'bg-[#1F2833]/40 border border-gray-800 text-cyan-200 mr-auto text-left text-[11px]'
+                        }`}>
+                          {msg.content}
+                        </div>
+                      ))}
+                      {recoveryChatLoading && (
+                        <div className="text-[#06C6B3] font-mono text-[9px] animate-pulse">Agent is updating recovery timeline...</div>
+                      )}
+                    </div>
+
+                    <form onSubmit={handleSendRecoveryChatMessage} className="flex gap-2 border-t border-white/5 pt-2">
+                      <input
+                        type="text"
+                        placeholder="Ask the AI to modify or adjust the checklist steps..."
+                        value={recoveryChatInput}
+                        onChange={e => setRecoveryChatInput(e.target.value)}
+                        disabled={recoveryChatLoading}
+                        className="flex-1 rounded-xl px-3 py-2 text-xs focus:outline-none bg-[#1F2833]/30 text-gray-200 border border-gray-800"
+                      />
+                      <button
+                        type="submit"
+                        disabled={recoveryChatLoading}
+                        className="px-4 py-2 bg-[#8A2BE2] hover:opacity-90 text-white rounded-xl text-xs font-bold uppercase tracking-wider disabled:opacity-50 cursor-pointer"
+                      >
+                        Negotiate
+                      </button>
+                    </form>
+                  </div>
                 </div>
-              </div>
-            ) : null}
+              ) : null}
+            </div>
 
             {!rescueLoading && !rescueError && (
-              <div className="flex justify-between items-center pt-2 border-t border-gray-900">
+              <div className="flex justify-between items-center pt-2 border-t border-gray-900 flex-shrink-0">
                 <span className="text-[9px] font-mono text-gray-500 uppercase tracking-widest">
                   🔒 Committing will lock the Todo checklist in the right sidebar.
                 </span>
@@ -4176,6 +4331,10 @@ Your current plan is achievable based on the estimated hours alone. Re-run the A
                   onClick={async () => {
                     if (rescueData) {
                       localStorage.setItem("chronos-active-recovery-task-id", rescueData.id);
+                      const timeKey = `chronos-recovery-target-time-${rescueData.id}`;
+                      if (!localStorage.getItem(timeKey)) {
+                        localStorage.setItem(timeKey, getDefaultTargetTimeStr());
+                      }
                       setActiveRecoveryTaskId(rescueData.id);
                     }
                     setRescuingTaskId(null);
@@ -4211,6 +4370,7 @@ Your current plan is achievable based on the estimated hours alone. Re-run the A
                       setSuggestedEstimate(null);
                     }}
                     className="text-gray-400 hover:text-gray-200 text-xs focus:outline-none"
+                    aria-label="Close task modal"
                   >
                     ✕
                   </button>
@@ -4418,7 +4578,10 @@ Your current plan is achievable based on the estimated hours alone. Re-run the A
                           if (!newDue) missing.push("deadline");
                           else if (new Date(newDue) <= new Date()) missing.push("valid future deadline");
                           const estDisabled = missing.length > 0;
-                          const tooltip = missing.length > 0 ? `Requires: ${missing.join(", ")}` : "";
+                          // Always explain Local AI Core requirement; if form incomplete, explain that too
+                          const tooltip = missing.length > 0
+                            ? `Requires: ${missing.join(", ")} — Uses Local AI Core (optional). If AI Core is offline, a rule-based fallback is used.`
+                            : "Uses Local AI Core for intelligent estimation. If offline, a rule-based fallback activates automatically.";
                           return (
                             <button
                               type="button"
@@ -4443,6 +4606,7 @@ Your current plan is achievable based on the estimated hours alone. Re-run the A
                                   : 'text-[#06C6B3] border-[#06C6B3]/40 bg-[#06C6B3]/10 hover:bg-[#06C6B3]/20 hover:border-[#06C6B3]/60 cursor-pointer animate-pulse'
                               }`}
                               title={tooltip}
+                              aria-label={estDisabled ? `AI Summarizer — ${tooltip}` : "Open AI Summarizer"}
                             >
                               {showEstimationAssistant ? "✕ Close Summarizer" : "💬 AI Summarizer"}
                             </button>
@@ -4484,8 +4648,8 @@ Your current plan is achievable based on the estimated hours alone. Re-run the A
 
                   <div className="pt-2 border-t border-gray-900 space-y-2">
                     {!hasCompletedAiEstimation && (
-                      <p className="text-[9px] text-amber-400/90 font-mono uppercase tracking-widest text-right animate-pulse">
-                        ⚠️ Discussion with AI Estimator Core is required before saving
+                      <p className="text-[9px] text-amber-400/90 font-mono uppercase tracking-widest text-right animate-pulse" title="Open the AI Summarizer above to unlock saving. If AI Core is offline, a rule-based fallback will unlock this after 3 exchanges.">
+                        ⚠️ Run AI Summarizer to unlock — works offline too
                       </p>
                     )}
                     <div className="flex justify-end gap-2">
@@ -4543,13 +4707,16 @@ Your current plan is achievable based on the estimated hours alone. Re-run the A
                           AI Summarizer Core
                         </h2>
                         <p className="text-[8px] text-gray-500 uppercase tracking-widest mt-0.5">
-                          Calibrating temporal effort requirements
+                          {voiceTelemetry.status === 'offline' ? (
+                            <span className="text-amber-400/80">⚠ Local AI Core offline — fallback mode active</span>
+                          ) : 'Calibrating temporal effort requirements'}
                         </p>
                       </div>
                       <button
                         type="button"
                         onClick={() => setShowEstimationAssistant(false)}
                         className="text-gray-400 hover:text-gray-250 text-xs focus:outline-none font-bold"
+                        aria-label="Close AI Summarizer"
                       >
                         ✕
                       </button>
@@ -4649,6 +4816,7 @@ Your current plan is achievable based on the estimated hours alone. Re-run the A
               <button
                 onClick={() => setOpenSettings(false)}
                 className="text-gray-400 hover:text-gray-200 text-xs focus:outline-none font-bold"
+                aria-label="Close settings"
               >
                 ✕
               </button>
@@ -5354,6 +5522,7 @@ Your current plan is achievable based on the estimated hours alone. Re-run the A
                     type="button"
                     onClick={() => setOpenTwinModal(false)}
                     className="flex-1 px-5 py-2.5 bg-[#1F2833]/40 border border-gray-800 text-gray-400 hover:text-gray-200 font-mono text-[10px] uppercase tracking-wider rounded-xl hover:bg-[#1F2833]/60 transition-all cursor-pointer text-center"
+                    aria-label="Close twin profile"
                   >
                     Exit Profile
                   </button>
@@ -5524,6 +5693,7 @@ Your current plan is achievable based on the estimated hours alone. Re-run the A
             <button
               onClick={() => setShowPhoneModal(false)}
               className="absolute top-4 right-4 text-gray-400 hover:text-white transition-colors focus:outline-none text-base font-bold font-mono"
+              aria-label="Close phone link modal"
             >
               ✕
             </button>

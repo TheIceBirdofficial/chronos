@@ -61,6 +61,7 @@ function TimelinePageContent() {
   const [loading, setLoading] = useState(true);
   const [aiConfig, setAiConfig] = useState<any>(null);
   const [hoveredMile, setHoveredMile] = useState<string | null>(null);
+  const [expandedMileId, setExpandedMileId] = useState<string | null>(null);
   const [isTransitioning, setIsTransitioning] = useState(true);
 
   // Timeline Personalization States
@@ -698,6 +699,7 @@ No markdown, no explanation.`;
                               left: `calc(50% + ${mile.branchX}px)`,
                               transform: 'translateX(-50%)',
                             }}
+                            onClick={() => setExpandedMileId(expandedMileId === mile.id ? null : mile.id)}
                           >
                             {/* Glow ring */}
                             <div
@@ -725,7 +727,7 @@ No markdown, no explanation.`;
 
                           {/* Milestone label */}
                           <div
-                            className="absolute top-[24px] z-10"
+                            className="absolute top-[24px] z-10 cursor-pointer"
                             style={{
                               left: isLeft
                                 ? `calc(50% + ${mile.branchX - 28}px)`
@@ -734,6 +736,7 @@ No markdown, no explanation.`;
                               transform: isLeft ? 'translateX(-100%)' : 'none',
                               textAlign: isLeft ? 'right' : 'left',
                             }}
+                            onClick={() => setExpandedMileId(expandedMileId === mile.id ? null : mile.id)}
                           >
                             <div className="text-[8px] font-mono uppercase tracking-widest text-gray-500 mb-0.5">
                               {mile.scheduledTime}
@@ -756,6 +759,32 @@ No markdown, no explanation.`;
                               width: '240px'
                             }}
                           >
+                            {expandedMileId === mile.id && (
+                              <div
+                                className="bg-[#8A2BE2]/10 border border-[#8A2BE2]/40 rounded-xl p-3 backdrop-blur-sm text-xs space-y-1.5 animate-in fade-in slide-in-from-top-1 duration-200"
+                              >
+                                <div className="font-mono text-[8px] uppercase tracking-wider text-[#66FCF1]">Milestone Intelligence</div>
+                                <div className="text-white font-bold leading-tight">{mile.title}</div>
+                                <div>
+                                  <span className="text-gray-500 font-mono text-[8px] uppercase">Duration:</span>{" "}
+                                  <span className="text-gray-200 font-mono">
+                                    {mile.checkpoints.reduce((sum, c) => sum + c.estimatedMinutes, 0)} mins
+                                  </span>
+                                </div>
+                                <div>
+                                  <span className="text-gray-500 font-mono text-[8px] uppercase">Dependencies:</span>{" "}
+                                  <span className="text-gray-200 font-mono">
+                                    {mIdx > 0 ? `Milestone ${mIdx}` : 'None'}
+                                  </span>
+                                </div>
+                                <div>
+                                  <span className="text-gray-500 font-mono text-[8px] uppercase">Status:</span>{" "}
+                                  <span className={`font-mono text-[9px] font-bold uppercase ${
+                                    mile.status === 'completed' ? 'text-green-400' : 'text-[#bf5af2]'
+                                  }`}>{mile.status}</span>
+                                </div>
+                              </div>
+                            )}
                             {mile.checkpoints.map((cp, cpIdx) => (
                               <div
                                 key={cp.id}

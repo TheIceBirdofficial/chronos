@@ -23,6 +23,7 @@ export default function SettingsGear({ isOffline, onClick }: SettingsGearProps) 
             : 'hover:border-[#8A2BE2]/40 hover:shadow-[0_0_15px_rgba(138,43,226,0.15)]'
         }`}
         title="System Configuration"
+        aria-label="Open settings"
       >
         <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
           <circle cx="12" cy="12" r="3"></circle>

@@ -897,6 +897,10 @@ export default function Home() {
   });
   const devOverrideStateRef = useRef(devOverrideState);
   const verificationInFlightRef = useRef(false);
+  // Stable tabId for voice daemon — generated once per session
+  const tabIdRef = useRef<string>(typeof crypto !== 'undefined' ? crypto.randomUUID() : Math.random().toString(36).substring(2));
+  // Heartbeat failure counter for exponential backoff
+  const heartbeatFailCountRef = useRef<number>(0);
   
   useEffect(() => {
     devOverrideStateRef.current = devOverrideState;
@@ -1049,14 +1053,27 @@ export default function Home() {
   }, []);
 
   useEffect(() => {
+    let mounted = true;
     let interval: NodeJS.Timeout;
-    const tabId = Math.random().toString(36).substring(2);
+    const tabId = tabIdRef.current;
     
     const sendHeartbeat = async () => {
+      if (!mounted) return;
+      // Exponential backoff: slow down polling after repeated failures
+      const failCount = heartbeatFailCountRef.current;
+      if (failCount > 0) {
+        const backoffMultiplier = Math.min(failCount, 12);
+        if (Math.random() > 1 / backoffMultiplier) return;
+      }
       try {
-        await fetch(`http://127.0.0.1:43210/heartbeat?tabId=${tabId}`, { mode: 'cors' });
+        const controller = new AbortController();
+        const timeout = setTimeout(() => controller.abort(), 2000);
+        await fetch(`http://127.0.0.1:43210/heartbeat?tabId=${tabId}`, { mode: 'cors', signal: controller.signal });
+        clearTimeout(timeout);
+        if (mounted) heartbeatFailCountRef.current = 0;
       } catch (e) {
-        // Ignore connection failures when daemon is not running
+        // Daemon not running — optional feature, suppress error
+        if (mounted) heartbeatFailCountRef.current += 1;
       }
     };
 
@@ -1065,10 +1082,11 @@ export default function Home() {
     };
 
     sendHeartbeat();
-    interval = setInterval(sendHeartbeat, 3000);
+    interval = setInterval(sendHeartbeat, 5000);
     window.addEventListener('beforeunload', handleUnload);
 
     return () => {
+      mounted = false;
       clearInterval(interval);
       window.removeEventListener('beforeunload', handleUnload);
     };
