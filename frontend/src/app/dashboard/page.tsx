@@ -962,25 +962,13 @@ export default function Dashboard() {
       clearTimeout(slowTimer);
       if (!res.ok) throw new Error("API core offline");
       const data = await res.json();
-      const cached = readCachedTasks();
-      if (Array.isArray(data) && data.length === 0 && cached.length > 0) {
-        replaceTasks(cached);
-        cached.forEach(task => {
-          fetch(`${API_BASE}/api/tasks/${task.id}`, {
-            method: "PUT",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify(task)
-          }).catch(err => console.warn("Failed to rehydrate cached task", err));
-        });
-        checkAndSpeakInterventions(cached);
-      } else {
-        const nextTasks = Array.isArray(data) ? data : [];
-        replaceTasks(nextTasks);
-        checkAndSpeakInterventions(nextTasks);
-      }
+      const nextTasks = Array.isArray(data) ? data : [];
+      replaceTasks(nextTasks);
+      checkAndSpeakInterventions(nextTasks);
     } catch (err) {
       clearTimeout(slowTimer);
       console.warn("Could not fetch tasks from backend.", err);
+      // Only restore cache on actual network/backend failure, not on a valid empty response
       const cached = readCachedTasks();
       if (cached.length > 0) {
         replaceTasks(cached);
@@ -5668,6 +5656,9 @@ Your current plan is achievable based on the estimated hours alone. Re-run the A
                       setStreakCount(data.streakCount || 0);
                     }
                     toast.error(`Nexus Event Logged: "${deadTask.title}" has collapsed.`);
+                    // Remove the acknowledged task from cache BEFORE clearing deadTask state
+                    const currentCache = readCachedTasks();
+                    cacheTasks(currentCache.filter(t => t.id !== deadTask.id));
                     setDeadTask(null);
                     fetchTasks(); // refresh task list
                   }

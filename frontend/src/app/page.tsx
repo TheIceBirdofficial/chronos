@@ -2098,7 +2098,31 @@ Start the final response with "IDENTITY SCAN COMPLETE". (The final profile summa
       }
     } catch (err: any) {
       console.error("Identity Scan Chat Error:", err);
-      setScanError(err.message || "Failed to establish contact with the AI supplier.");
+      // Convert raw fetch/network errors to user-friendly messages
+      const rawMsg: string = err?.message || '';
+      let friendlyMsg = rawMsg;
+      if (
+        rawMsg === 'Failed to fetch' ||
+        rawMsg.includes('fetch') ||
+        rawMsg.includes('NetworkError') ||
+        rawMsg.includes('network') ||
+        rawMsg.includes('ERR_CONNECTION') ||
+        rawMsg.includes('ECONNREFUSED') ||
+        rawMsg.includes('Load failed')
+      ) {
+        friendlyMsg = 'Unable to contact the configured AI provider. Check your internet connection and AI provider settings.';
+      } else if (rawMsg.includes('401') || rawMsg.toLowerCase().includes('unauthorized') || rawMsg.toLowerCase().includes('api key')) {
+        friendlyMsg = 'Authentication failed. Your API key may be invalid or expired. Please check your AI provider settings.';
+      } else if (rawMsg.includes('429') || rawMsg.toLowerCase().includes('rate limit')) {
+        friendlyMsg = 'AI provider rate limit reached. Please wait a moment before retrying.';
+      } else if (rawMsg.includes('timeout') || rawMsg.includes('Timeout')) {
+        friendlyMsg = 'The request timed out. The AI provider may be slow or unreachable.';
+      } else if (!rawMsg) {
+        friendlyMsg = 'An unexpected error occurred while contacting the AI provider.';
+      }
+      setScanError(friendlyMsg);
+      // Always stop loading immediately on error — never leave user stuck
+      setChatLoading(false);
     } finally {
       if (step !== 'done') {
         setChatLoading(false);
@@ -3552,22 +3576,33 @@ Start the final response with "IDENTITY SCAN COMPLETE". (The final profile summa
               {/* Scan Status Header */}
               <div className="w-full flex items-center justify-between border-b border-[#06C6B3]/10 pb-4">
                 <div className="text-left space-y-0.5">
-                  <h2 className="text-xs font-bold uppercase tracking-widest text-[#06C6B3]">
-                    Identity Scan Active
+                  <h2 className={`text-xs font-bold uppercase tracking-widest ${scanError ? 'text-red-400' : 'text-[#06C6B3]'}`}>
+                    {scanError ? 'Scan Interrupted' : 'Identity Scan Active'}
                   </h2>
                   <p className="text-[9px] font-mono text-gray-500 uppercase">
                     Supplier: {aiConfig.provider.toUpperCase()} ({aiConfig.model})
                   </p>
                 </div>
                 <div className="text-right space-y-1 flex flex-col items-end">
-                  <div className="text-[9px] font-mono text-[#8A2BE2] tracking-wider uppercase">
-                    Cognitive Syncing...
-                  </div>
-                  {/* Infinite sweeping scanner animation */}
+                  {scanError ? (
+                    <div className="text-[9px] font-mono text-red-400 tracking-wider uppercase animate-in fade-in duration-200">
+                      AI Provider Unreachable
+                    </div>
+                  ) : (
+                    <div className="text-[9px] font-mono text-[#8A2BE2] tracking-wider uppercase">
+                      {chatLoading ? 'Cognitive Syncing...' : 'Scan In Progress'}
+                    </div>
+                  )}
+                  {/* Sweeping scanner animation — only shown when actively scanning, not on error */}
                   <div className="w-24 bg-[#1F2833] h-1 rounded-full overflow-hidden relative mt-1">
-                    <div 
-                      className="bg-gradient-to-r from-[#06C6B3] to-[#8A2BE2] h-full absolute w-8 animate-[scannerSweep_2s_ease-in-out_infinite]"
-                    />
+                    {!scanError && (
+                      <div 
+                        className="bg-gradient-to-r from-[#06C6B3] to-[#8A2BE2] h-full absolute w-8 animate-[scannerSweep_2s_ease-in-out_infinite]"
+                      />
+                    )}
+                    {scanError && (
+                      <div className="bg-red-500/40 h-full w-full" />
+                    )}
                   </div>
                 </div>
               </div>
@@ -3584,58 +3619,68 @@ Start the final response with "IDENTITY SCAN COMPLETE". (The final profile summa
                 ) : scanError ? (
                   <div className="space-y-4 py-4 text-left border border-red-500/20 bg-red-950/20 p-6 rounded-2xl animate-in fade-in duration-200 w-full font-sans">
                     <div className="flex items-center gap-2 text-red-400 font-bold uppercase tracking-wider text-xs">
-                      <span className="text-sm">⚠️</span> API Sync Interrupted (Offline)
+                      <span className="text-sm">⚠️</span> AI Provider Unreachable
                     </div>
                     <p className="text-xs text-gray-300 leading-relaxed">
-                      Chronos failed to establish contact with the AI supplier:
-                      <span className="block mt-1 font-mono text-[10px] text-red-300 p-2 bg-black/40 rounded border border-red-950/60 max-h-24 overflow-y-auto">
-                        {scanError}
-                      </span>
+                      Chronos couldn't establish a connection with the selected AI service.
                     </p>
-                    <div className="space-y-1.5 pt-2 text-[10px] text-gray-400">
-                      <p className="font-bold text-gray-300 uppercase tracking-widest">Diagnostic Checklist:</p>
-                      <ul className="list-disc pl-4 space-y-1 font-sans">
-                        <li>Ensure that your internet connection is active and stable.</li>
-                        <li>Make sure that your target model <code className="bg-black/30 px-1 py-0.5 rounded text-amber-400 font-mono text-[9px]">{aiConfig.model}</code> is supported by your provider.</li>
-                        <li>Ensure the Chronos Python backend daemon is online on port 5000.</li>
-                        <li>Check your API keys or base URL override under the AI Core Settings.</li>
+                    <div className="font-mono text-[10px] text-amber-300/80 p-2.5 bg-black/40 rounded-lg border border-amber-900/40 leading-relaxed">
+                      {scanError}
+                    </div>
+                    <div className="space-y-1.5 pt-1 text-[10px] text-gray-400">
+                      <p className="font-bold text-gray-300 uppercase tracking-widest text-[9px]">Troubleshooting:</p>
+                      <ul className="list-disc pl-4 space-y-1.5 font-sans">
+                        <li>Ensure your internet connection is available and stable.</li>
+                        <li>Verify your AI provider configuration — check your API key and Base URL in <span className="text-[#06C6B3]">AI Settings</span>.</li>
+                        <li>Confirm model <code className="bg-black/30 px-1 py-0.5 rounded text-amber-400 font-mono text-[9px]">{aiConfig.model}</code> is supported by <span className="text-gray-300">{aiConfig.provider.toUpperCase()}</span>.</li>
+                        {aiConfig.provider === 'local' && <li>Ensure the Local AI Core is running if using a localhost endpoint.</li>}
                       </ul>
                     </div>
-                    <div className="flex gap-3 pt-2">
-                      <button
-                        type="button"
-                        onClick={async () => {
-                          setScanError(null);
-                          setChatLoading(true);
-                          const userMsgs = chatHistory.filter(m => m.role === 'user');
-                          if (userMsgs.length === 0) {
-                            setChatLoading(false);
-                            startIdentityScan();
-                          } else {
-                            const tempHistory = [...chatHistory];
-                            const lastMsg = tempHistory.pop();
-                            if (lastMsg && lastMsg.role === 'user') {
-                              setChatHistory(tempHistory);
-                              setUserInput(lastMsg.content);
-                              setChatLoading(false);
+                    <div className="pt-1 p-2.5 rounded-lg bg-[#06C6B3]/5 border border-[#06C6B3]/20 text-[10px] text-[#06C6B3]/80">
+                      💡 <span className="font-semibold">Offline Mode Available:</span> You can continue without AI. Chronos will generate a heuristic profile from your responses so far.
+                    </div>
+                    <div className="flex flex-col gap-2 pt-1">
+                      <div className="flex gap-3">
+                        <button
+                          type="button"
+                          onClick={async () => {
+                            setScanError(null);
+                            const userMsgs = chatHistory.filter(m => m.role === 'user');
+                            if (userMsgs.length === 0) {
+                              startIdentityScan();
                             } else {
-                              setChatLoading(false);
+                              const tempHistory = [...chatHistory];
+                              const lastMsg = tempHistory.pop();
+                              if (lastMsg && lastMsg.role === 'user') {
+                                setChatHistory(tempHistory);
+                                setUserInput(lastMsg.content);
+                              }
                             }
-                          }
-                        }}
-                        className="flex-1 py-2.5 rounded-xl bg-red-500 hover:bg-red-400 text-black font-bold font-mono text-[10px] transition-all cursor-pointer text-center uppercase tracking-wider focus:outline-none"
-                      >
-                        Retry Connection
-                      </button>
+                          }}
+                          className="flex-1 py-2.5 rounded-xl bg-red-500 hover:bg-red-400 text-black font-bold font-mono text-[10px] transition-all cursor-pointer text-center uppercase tracking-wider focus:outline-none"
+                        >
+                          ↺ Retry Connection
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setScanError(null);
+                            setStep('about');
+                          }}
+                          className="px-4 py-2.5 rounded-xl bg-white/5 border border-white/10 text-gray-400 font-mono text-[10px] hover:bg-white/10 transition-all cursor-pointer uppercase tracking-wider focus:outline-none"
+                        >
+                          Cancel
+                        </button>
+                      </div>
                       <button
                         type="button"
                         onClick={() => {
                           setScanError(null);
-                          setStep('about');
+                          handleInstantBypass();
                         }}
-                        className="px-4 py-2.5 rounded-xl bg-white/5 border border-white/10 text-gray-400 font-mono text-[10px] hover:bg-white/10 transition-all cursor-pointer uppercase tracking-wider focus:outline-none"
+                        className="w-full py-2.5 rounded-xl bg-[#06C6B3]/15 border border-[#06C6B3]/30 text-[#06C6B3] font-bold font-mono text-[10px] hover:bg-[#06C6B3]/25 transition-all cursor-pointer uppercase tracking-wider focus:outline-none"
                       >
-                        Abort Scan
+                        ⚡ Continue Offline
                       </button>
                     </div>
                   </div>
